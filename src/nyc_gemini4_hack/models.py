@@ -141,12 +141,30 @@ class BuildPlan(BaseModel):
         return steps
 
 
+class GlobalProductOption(BaseModel):
+    """Product option discovered across Shopify merchants via Global Catalog MCP."""
+
+    material_id: str = ""
+    material_name: str = ""
+    product_id: str
+    variant_id: str
+    product_title: str
+    merchant: str = ""
+    price: str = "$0.00"
+    price_minor: int = 0
+    currency: str = "USD"
+    product_url: str | None = None
+    image_url: str | None = None
+    available: bool = True
+
+
 class CartLineItem(BaseModel):
     material_id: str
     material_name: str
     product_title: str
     variant_id: str
     price: str
+    quantity: int = 1
     rationale: str | None = None
     product_url: str | None = None
     image_url: str | None = None
@@ -155,7 +173,11 @@ class CartLineItem(BaseModel):
 class ShoppingCartProposal(BaseModel):
     cart_id: str | None = None
     checkout_url: str | None = None
+    store_domain: str | None = None
+    subtotal: str = "$0.00"
+    currency: str = "USD"
     matched_items: list[CartLineItem] = Field(default_factory=list)
+    global_options: list[GlobalProductOption] = Field(default_factory=list)
     unmatched_materials: list[str] = Field(default_factory=list)
 
 
@@ -210,3 +232,18 @@ class CreateProjectRequest(BaseModel):
 
 class RebuildCartRequest(BaseModel):
     owned_material_ids: list[str] = Field(default_factory=list)
+
+
+class ShopifySearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=200)
+    limit: int = Field(default=5, ge=1, le=20)
+    scope: str = Field(default="both")  # "global" | "store" | "both"
+
+
+class ShopifyCartLineRequest(BaseModel):
+    variant_id: str = Field(..., min_length=1)
+    quantity: int = Field(default=1, ge=1, le=99)
+
+
+class ShopifyCartRequest(BaseModel):
+    items: list[ShopifyCartLineRequest] = Field(..., min_length=1)

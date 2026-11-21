@@ -80,13 +80,12 @@ class CommercePreservationTests(unittest.TestCase):
         with TestClient(create_app(settings=settings)) as client:
             health = client.get("/api/health").json()
             self.assertTrue(health["shopify_mcp_configured"])
-            self.assertFalse(health["capabilities"]["commerce"])
+            self.assertTrue(health["capabilities"]["commerce"])
             owned = ["ruler", "paper"]
             response = client.post("/api/projects/origami/cart/rebuild", json={"owned_material_ids": owned})
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json(), {
-                "project_id": "origami", "owned_material_ids": owned,
-                "message": "Shopify MCP cart rebuild will be wired in Slice 3.",
-            })
-            self.assertEqual(client.get("/api/projects/origami").json()["cart"], cart)
+            self.assertEqual(response.status_code, 400)
+            saved_cart = client.get("/api/projects/origami").json()["cart"]
+            self.assertEqual(saved_cart["cart_id"], cart["cart_id"])
+            self.assertEqual(saved_cart["checkout_url"], cart["checkout_url"])
+            self.assertEqual(saved_cart["unmatched_materials"], cart["unmatched_materials"])
             self.assertEqual(client.post("/api/projects/missing/cart/rebuild", json={}).status_code, 404)

@@ -164,6 +164,12 @@ class JobStore:
             (project.model_dump_json(), event_name, json.dumps(payload), terminal, terminal, project.project_id, worker_id)))
         return bool(rows)
 
+    async def update(self, project: ProjectState, event_name: str, payload: dict) -> bool:
+        rows = await self._run(("""UPDATE craftpov_projects SET state=?, revision=revision+1, last_event=?, last_payload=?
+            WHERE id=? RETURNING revision""",
+            (project.model_dump_json(), event_name, json.dumps(payload), project.project_id)))
+        return bool(rows)
+
 
 @asynccontextmanager
 async def open_job_store(local_path: Path | None) -> AsyncIterator[JobStore]:

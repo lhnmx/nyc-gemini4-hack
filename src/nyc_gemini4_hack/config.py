@@ -41,8 +41,12 @@ class Settings(BaseSettings):
     # YouTube Data API v3
     youtube_api_key: str = Field(default="")
 
-    # Shopify Commerce (shop.dev / Storefront MCP)
+    # Shopify Commerce (Global Catalog MCP + Mock Store UCP MCP)
     shopify_mcp_url: str = Field(default="")
+    shopify_global_mcp_url: str = Field(default="https://catalog.shopify.com/api/ucp/mcp")
+    shopify_ucp_agent_profile_url: str = Field(
+        default="https://cdn.jsdelivr.net/gh/lhnmx/nyc-gemini4-hack@b6ec64927c3feb6c0670ff0bf5715e33b590b208/ucp-agent-profile.json"
+    )
     shopify_storefront_token: str = Field(default="")
     shopify_shop_domain: str = Field(default="")
 
@@ -70,10 +74,11 @@ class Settings(BaseSettings):
             "gemini_configured": bool(self.gemini_api_key.strip()),
             "youtube_configured": bool(self.youtube_api_key.strip()),
             "shopify_mcp_configured": bool(self.shopify_mcp_url.strip()),
+            "shopify_global_mcp_configured": bool(self.shopify_global_mcp_url.strip()),
             "decisions_api_enabled": self.gemini_decisions_enabled,
             "capabilities": {
                 "media_mode": self.pov_media_mode,
-                "commerce": False,
+                "commerce": bool(self.shopify_mcp_url.strip()),
                 "live_coach": False,
                 "desk_inventory": False,
             },

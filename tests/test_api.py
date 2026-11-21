@@ -71,9 +71,11 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(client.get("/api/projects/unknown/events").status_code, 404)
             created = client.post("/api/projects", data={"goal": "Fold a glider"}).json()
             path = f"/api/projects/{created['project_id']}"
-            self.assertEqual(client.post(path + "/cart/rebuild", json={}).json()["owned_material_ids"], [])
-            self.assertEqual(client.post(path + "/steps/1/checkin", files={"frame": ("f.jpg", b"f")}).status_code, 501)
             client.get(created["events_url"])
+            rebuilt = client.post(path + "/cart/rebuild", json={})
+            self.assertEqual(rebuilt.status_code, 200)
+            self.assertEqual(rebuilt.json()["matched_items"], [])
+            self.assertEqual(client.post(path + "/steps/1/checkin", files={"frame": ("f.jpg", b"f")}).status_code, 501)
 
     def test_local_media_from_an_earlier_cli_run(self):
         folder = self.settings.media_output_dir / "saved-run"

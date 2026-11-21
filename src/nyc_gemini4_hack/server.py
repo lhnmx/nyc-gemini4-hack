@@ -14,10 +14,23 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Stre
 from vercel import blob
 
 from nyc_gemini4_hack import blob_media
+from nyc_gemini4_hack.agents.commerce import (
+    build_shopping_cart_proposal,
+    create_mock_store_cart,
+    search_shopify_products,
+)
 from nyc_gemini4_hack.config import Settings, get_settings
 from nyc_gemini4_hack.intake import creation_response, prepare_project
 from nyc_gemini4_hack.job_store import JobStore, JobStoreError, open_job_store
-from nyc_gemini4_hack.models import ProjectState, ProjectStatus, RebuildCartRequest
+from nyc_gemini4_hack.models import (
+    MaterialStatus,
+    ProjectState,
+    ProjectStatus,
+    RebuildCartRequest,
+    ShopifyCartRequest,
+    ShopifySearchRequest,
+    ShoppingCartProposal,
+)
 
 ProjectId = Annotated[str, ApiPath(pattern=r"^[a-zA-Z0-9_-]+$", max_length=96)]
 
@@ -162,14 +175,46 @@ def create_app(*, hosted: bool = False, settings: Settings | None = None) -> Fas
             raise HTTPException(404, "Media not found") from None
         return RedirectResponse(url, headers={"Cache-Control": "private, no-store"})
 
-    @app.post("/api/projects/{project_id}/cart/rebuild")
-    async def rebuild_cart(row: Loaded, body: RebuildCartRequest) -> dict[str, object]:
+    @app.post("/api/projects/{project_id}/cart/rebuild", response_model=ShoppingCartProposal)
+    async def rebuild_cart(row: Loaded, store: Store, body: RebuildCartRequest) -> ShoppingCartProposal:
         project, _ = row
+        if project.plan is None:
+            raise HTTPException(status_code=400, detail="Project plan is not ready yet")
+
+        owned_set = set(body.owned_material_ids)
+        for mat in project.plan.materials:
+            mat.status = MaterialStatus.OWNED_EXACT if mat.id in owned_set else MaterialStatus.BUY
+
+        cart = await build_shopping_cart_proposal(
+            materials=project.plan.materials,
+            owned_material_ids=owned_set,
+        )
+        project.cart = cart
+        await store.update(project, "cart_ready", cart.model_dump(mode="json"))
+        return cart
+
+    @app.post("/api/shopify/search")
+    async def shopify_search(body: ShopifySearchRequest) -> dict[str, object]:
+        """Reusable standalone endpoint: search Global Catalog MCP and/or mock dev store."""
+        results = await search_shopify_products(
+            query=body.query,
+            limit=body.limit,
+            scope=body.scope,
+        )
         return {
-            "project_id": project.project_id,
-            "owned_material_ids": body.owned_material_ids,
-            "message": "Shopify MCP cart rebuild will be wired in Slice 3.",
+            "query": body.query,
+            "scope": body.scope,
+            "global_options": [opt.model_dump() for opt in results["global"]],
+            "store_options": [opt.model_dump() for opt in results["store"]],
         }
+
+    @app.post("/api/shopify/cart", response_model=ShoppingCartProposal)
+    async def shopify_create_cart(body: ShopifyCartRequest) -> ShoppingCartProposal:
+        """Reusable standalone endpoint: create a live checkout cart on the mock dev store."""
+        try:
+            return await create_mock_store_cart(body.items)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/projects/{project_id}/steps/{step_number}/checkin")
     async def step_checkin(row: Loaded, step_number: int, frame: UploadFile = File(...)):

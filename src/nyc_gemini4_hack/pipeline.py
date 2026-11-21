@@ -5,6 +5,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from nyc_gemini4_hack.agents.commerce import build_shopping_cart_proposal
 from nyc_gemini4_hack.agents.planner import synthesize_build_plan
 from nyc_gemini4_hack.agents.researcher import research_goal_on_youtube
 from nyc_gemini4_hack.config import get_settings
@@ -279,7 +280,18 @@ async def run_project_pipeline(
 
         await emit("plan_ready", plan.model_dump())
 
-        # 3. POV Video + Voice Generation
+        # 3. Run Shopify MCP Commerce (Global Catalog options + Mock Store cart)
+        #    in parallel with POV Video + Voice Generation so cart_ready lands early.
+        async def _run_commerce() -> None:
+            try:
+                cart = await build_shopping_cart_proposal(materials=plan.materials)
+                project.cart = cart
+                await emit("cart_ready", cart.model_dump(mode="json"))
+            except Exception as exc:
+                logger.warning("Shopify MCP commerce step failed: %s", exc)
+
+        commerce_task = asyncio.create_task(_run_commerce()) if plan.materials else None
+
         if generate_media:
             await generate_media_for_plan(
                 project=project,
@@ -287,7 +299,11 @@ async def run_project_pipeline(
                 publish_event=publish_event,
                 max_steps=max_media_steps,
             )
+            if commerce_task is not None:
+                await commerce_task
         else:
+            if commerce_task is not None:
+                await commerce_task
             project.status = ProjectStatus.COMPLETED
             project.status_message = f"Your written guide is ready with {len(plan.steps)} steps."
             await emit("status", {"status": project.status.value, "message": project.status_message})
