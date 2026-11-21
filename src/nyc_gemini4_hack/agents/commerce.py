@@ -552,3 +552,107 @@ async def build_shopping_cart_proposal(
         global_options=global_options,
         unmatched_materials=unmatched_materials,
     )
+
+
+async def place_dev_store_order(
+    items: list[ShopifyCartLineRequest],
+    note: str = "CraftPOV dev store order",
+) -> dict[str, Any]:
+    """
+    Create and complete a draft order on the configured Shopify dev store
+    using client_credentials OAuth + GraphQL Admin API.
+    """
+    settings = get_settings()
+    shop_domain = (settings.shopify_shop_domain or _extract_merchant(settings.shopify_mcp_url)).strip()
+    if not shop_domain:
+        raise ValueError("SHOPIFY_SHOP_DOMAIN is not configured.")
+    if not settings.shopify_client_id.strip() or not settings.shopify_client_secret.strip():
+        raise ValueError("SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET are required.")
+
+    merged: dict[str, int] = {}
+    for item in items:
+        merged[item.variant_id] = merged.get(item.variant_id, 0) + item.quantity
+    line_items = [{"variantId": vid, "quantity": qty} for vid, qty in merged.items()]
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        token_resp = await client.post(
+            f"https://{shop_domain}/admin/oauth/access_token",
+            data={
+                "client_id": settings.shopify_client_id.strip(),
+                "client_secret": settings.shopify_client_secret.strip(),
+                "grant_type": "client_credentials",
+            },
+        )
+        token_resp.raise_for_status()
+        access_token = token_resp.json().get("access_token") or ""
+        if not access_token:
+            raise RuntimeError("Shopify OAuth did not return an access_token.")
+
+        gql_url = f"https://{shop_domain}/admin/api/2025-10/graphql.json"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": access_token,
+        }
+
+        create_query = """
+        mutation draftOrderCreate($input: DraftOrderInput!) {
+          draftOrderCreate(input: $input) {
+            draftOrder { id name totalPrice }
+            userErrors { field message }
+          }
+        }
+        """
+        r1 = await client.post(
+            gql_url,
+            headers=headers,
+            json={
+                "query": create_query,
+                "variables": {"input": {"note": note, "lineItems": line_items}},
+            },
+        )
+        r1.raise_for_status()
+        d1 = r1.json()
+        if d1.get("errors"):
+            raise RuntimeError(f"Shopify draftOrderCreate GraphQL error: {d1['errors']}")
+        payload1 = (d1.get("data") or {}).get("draftOrderCreate") or {}
+        if payload1.get("userErrors"):
+            raise RuntimeError(f"Shopify draftOrderCreate userErrors: {payload1['userErrors']}")
+        draft = payload1.get("draftOrder")
+        if not draft or not draft.get("id"):
+            raise RuntimeError("Shopify draftOrderCreate returned no draftOrder.")
+
+        complete_query = """
+        mutation draftOrderComplete($id: ID!) {
+          draftOrderComplete(id: $id) {
+            draftOrder {
+              id
+              order {
+                id
+                name
+                totalPriceSet { shopMoney { amount currencyCode } }
+              }
+            }
+            userErrors { field message }
+          }
+        }
+        """
+        r2 = await client.post(
+            gql_url,
+            headers=headers,
+            json={"query": complete_query, "variables": {"id": draft["id"]}},
+        )
+        r2.raise_for_status()
+        d2 = r2.json()
+        if d2.get("errors"):
+            raise RuntimeError(f"Shopify draftOrderComplete GraphQL error: {d2['errors']}")
+        payload2 = (d2.get("data") or {}).get("draftOrderComplete") or {}
+        if payload2.get("userErrors"):
+            raise RuntimeError(f"Shopify draftOrderComplete userErrors: {payload2['userErrors']}")
+        order = ((payload2.get("draftOrder") or {}).get("order")) or {}
+        return {
+            "draft_order_id": draft["id"],
+            "order_id": order.get("id"),
+            "order_name": order.get("name"),
+            "total": ((order.get("totalPriceSet") or {}).get("shopMoney")) or {},
+            "store_domain": shop_domain,
+        }

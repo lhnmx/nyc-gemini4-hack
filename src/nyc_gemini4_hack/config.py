@@ -50,6 +50,8 @@ class Settings(BaseSettings):
         default="https://cdn.jsdelivr.net/gh/lhnmx/nyc-gemini4-hack@b6ec64927c3feb6c0670ff0bf5715e33b590b208/ucp-agent-profile.json"
     )
     shopify_storefront_token: str = Field(default="")
+    shopify_client_id: str = Field(default="")
+    shopify_client_secret: str = Field(default="")
     shopify_shop_domain: str = Field(default="")
 
     # Server & Storage
