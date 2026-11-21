@@ -23,6 +23,11 @@ class ShoppingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(catalog_config(settings()), (GLOBAL_CATALOG, PUBLIC_PROFILE))
         endpoint = "https://supplies.example/api/ucp/mcp"
         profile = "https://guide.example/ucp-agent-profile.json"
+        global_endpoint = "https://global.example/api/ucp/mcp"
+        upstream = settings(shopify_global_mcp_url=global_endpoint, shopify_ucp_agent_profile_url=profile)
+        self.assertEqual(catalog_config(upstream), (global_endpoint, profile))
+        self.assertIsNone(catalog_config(settings(shopify_global_mcp_url="")))
+        self.assertIsNone(catalog_config(settings(shopify_global_mcp_url="http://global.example/api/ucp/mcp")))
         for config in ({"shopify_shop_domain": "supplies.example"},
                        {"shopify_mcp_url": "https://supplies.example/api/mcp"},
                        {"shopify_mcp_url": endpoint}):
@@ -43,6 +48,7 @@ class ShoppingTests(unittest.IsolatedAsyncioTestCase):
         def reply(request):
             self.assertEqual(request.url, GLOBAL_CATALOG)
             self.assertEqual(request.method, "POST")
+            self.assertNotIn("Authorization", request.headers)
             body = json.loads(request.content)
             self.assertEqual(body["params"], {"name": "search_catalog", "arguments": {
                 "meta": {"ucp-agent": {"profile": PUBLIC_PROFILE}},

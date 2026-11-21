@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from nyc_gemini4_hack.agents.researcher import ActivityReporter, agent_operation
 from nyc_gemini4_hack.gemini_client import Gemini4Client
 from nyc_gemini4_hack.models import (
-    BuildPlan, BuildStep, MaterialItem, MaterialStatus, ObservedTechnique, PhysicalStateTransition,
+    BuildPlan, BuildStep, MaterialItem, MaterialStatus, PhysicalStateTransition,
     StepSourceSegment, TutorialExtract, VisualContinuityBible,
 )
 
@@ -50,17 +50,8 @@ def _index_footage(extracts: list[TutorialExtract]) -> tuple[list[dict], dict[st
     for source_number, source in enumerate(extracts, start=1):
         summary = source.model_dump(include={"url", "extracted_materials", "common_mistakes"}, exclude_defaults=True)
         summary["segments"] = []
-        for number, segment in enumerate(source.segments, start=1):
-            window = segment.time_range_seconds
-            if not window or not segment.hand_action.strip():
-                continue
-            segment_id = f"S{source_number}.{number}"
-            observation = StepSourceSegment(
-                segment_id=segment_id, source_url=source.url, source_title=source.title,
-                start_seconds=window[0], end_seconds=window[1],
-                **segment.model_dump(include=set(ObservedTechnique.model_fields)),
-            )
-            catalog[segment_id] = observation
+        for observation in source.source_observations(f"S{source_number}"):
+            catalog[observation.segment_id] = observation
             summary["segments"].append(observation.model_dump(exclude={"source_url", "source_title"}, exclude_defaults=True))
         observations.append(summary)
     return observations, catalog

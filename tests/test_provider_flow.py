@@ -28,7 +28,10 @@ class ProviderFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_illustration_mode_serializes_real_image_requests(self):
         await self.render_project(illustrated=True)
 
-    async def render_project(self, illustrated=False):
+    async def test_failed_video_recovers_with_reviewed_images_in_a_playable_mixed_film(self):
+        await self.render_project(recover=True)
+
+    async def render_project(self, illustrated=False, recover=False):
         folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
         settings = Settings(_env_file=None, media_output_dir=folder, gemini_api_key="offline",
                             gemini_model_carbon="research", gemini_model_argon="plan",
@@ -38,6 +41,9 @@ class ProviderFlowTests(unittest.IsolatedAsyncioTestCase):
         url = "https://www.youtube.com/watch?v=abcdefghijk"
         plan = paper_plan().model_dump()
         plan["steps"] = plan["steps"][:2]
+        if recover:
+            plan["steps"][1]["duration_seconds"] = 2
+            plan["steps"][1]["source_segments"] = ["S1.1"]
         if illustrated:
             plan["steps"] = plan["steps"][:1]
             plan["steps"][0]["duration_seconds"] = 1
@@ -65,6 +71,8 @@ class ProviderFlowTests(unittest.IsolatedAsyncioTestCase):
                 seen.append(kind)
                 if kind == "video":
                     self.assertEqual(body["model"], "gemini-omni-1.2-flash")
+                    if recover and seen.count("video") == 2:
+                        return httpx.Response(200, json={"id": "empty", "status": "completed", "steps": []})
                     part = {"type": "video", "mime_type": "video/mp4", "data": moving}
                 else:
                     part = {"type": "audio", "mime_type": "audio/wav", "data": base64.b64encode(next(audio)).decode()}
@@ -75,12 +83,23 @@ class ProviderFlowTests(unittest.IsolatedAsyncioTestCase):
             if body.get("generationConfig", {}).get("responseSchema", {}).get("title") == "_Observations":
                 self.assertEqual(model, "research")
                 seen.append("review")
-                part = {"text": json.dumps(sample_findings())}
+                findings = sample_findings()
+                if recover and seen.count("review") == 2:
+                    parts = body["contents"][0]["parts"]
+                    received = [base64.urlsafe_b64decode(x["inlineData"]["data"]) for x in parts if "inlineData" in x]
+                    self.assertEqual(received, list(PNG_FRAMES))
+                    self.assertIn("Crease the paper", parts[0]["text"])
+                    for i, field in enumerate(("opening", "contact", "result"), 1):
+                        findings[field]["sample"] = i
+                part = {"text": json.dumps(findings)}
                 return httpx.Response(200, json={"candidates": [
                     {"content": {"role": "model", "parts": [part]}, "finishReason": "STOP"}
                 ]})
             seen.append(model)
             if model == "illustrate":
+                if recover:
+                    prompt = body["contents"][0]["parts"][-1]["text"]
+                    self.assertIn("Crease the paper", prompt)
                 part = {"inlineData": {"mimeType": "image/png", "data": base64.b64encode(next(images)).decode()}}
             else:
                 self.assertIn("responseSchema", body["generationConfig"])
@@ -111,6 +130,25 @@ class ProviderFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater((folder / media_url.removeprefix("/media/")).stat().st_size, 0)
         if illustrated:
             self.assertCountEqual(seen[3:], ["illustrate"] * 3 + ["audio"])
+            return
+        if recover:
+            self.assertCountEqual(seen[3:], ["video", "audio", "review"] * 2 + ["illustrate"] * 3)
+            first, replacement = state.media[1], state.media[2]
+            self.assertEqual((first.media_mode, replacement.media_mode), ("motion", "illustrated_frames"))
+            self.assertEqual(replacement.video_model, settings.pov_image_model)
+            self.assertIn("no completed shot", replacement.motion_failure)
+            self.assertFalse(replacement.shot_reviews)
+            self.assertEqual(replacement.illustration_review.status, "passed")
+            self.assertEqual(replacement.illustration_review.source_segment_ids, ["S1.1"])
+            self.assertEqual(replacement.chapter_start_seconds, first.duration_seconds)
+            film = folder / state.full_video_url.removeprefix("/media/")
+            self.assertEqual(imageio_ffmpeg.count_frames_and_secs(film)[0],
+                             round((first.duration_seconds + replacement.duration_seconds) * 24))
+            captions = (folder / state.full_captions_url.removeprefix("/media/")).read_text()
+            self.assertLess(captions.index(plan["steps"][0]["narration_script"]),
+                            captions.index(plan["steps"][1]["narration_script"]))
+            for url in (replacement.video_url, replacement.audio_url, replacement.captions_url, replacement.keyframe_url):
+                self.assertGreater((folder / url.removeprefix("/media/")).stat().st_size, 0)
             return
         self.assertCountEqual(seen[3:], ["video", "audio", "review"] * 2)
         self.assertEqual([a.duration_seconds for a in state.media.values()], [26/24, 1])

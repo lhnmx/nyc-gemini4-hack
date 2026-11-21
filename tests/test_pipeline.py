@@ -5,10 +5,14 @@ import wave
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from nyc_gemini4_hack import pipeline
+from nyc_gemini4_hack import cloud_worker, pipeline
 from nyc_gemini4_hack.config import Settings
-from nyc_gemini4_hack.models import BuildPlan, ProjectState, ProjectStatus, ShotReview
+from nyc_gemini4_hack.job_store import open_job_store
 from nyc_gemini4_hack.media import composer
+from nyc_gemini4_hack.models import (
+    BuildPlan, FrameFinding, MaterialItem, ProjectState, ProjectStatus, ShoppingCartProposal, ShotReview,
+)
+from tests.test_video import PNG_FRAMES
 
 
 def paper_plan():
@@ -41,6 +45,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.client = self.enterContext(patch.object(pipeline, "Gemini4Client"))
         self.client.return_value.aclose = AsyncMock()
         self.client.return_value.settings = self.settings
+        self.client.return_value.model_id.return_value = "visual-reviewer"
         self.research = self.enterContext(patch.object(
             pipeline, "research_goal_on_youtube", new=AsyncMock(return_value=([], [])),
         ))
@@ -78,7 +83,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             return output
 
         self.motion = self.enterContext(patch.object(pipeline, "generate_motion_shot", side_effect=motion))
-        self.frames = self.enterContext(patch.object(pipeline, "generate_step_pov_frames"))
+        self.frames = self.enterContext(patch.object(pipeline, "generate_step_pov_frames",
+            side_effect=RuntimeError("Image provider unavailable")))
         self.voice = self.enterContext(patch.object(pipeline, "generate_step_voiceover", side_effect=voice))
         self.compose = self.enterContext(patch.object(pipeline, "compose_motion_with_voice", side_effect=compose))
         self.enterContext(patch.object(composer.imageio_ffmpeg, "count_frames_and_secs", side_effect=lambda path: (
@@ -92,6 +98,53 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
     async def run_project(self, **options):
         return await pipeline.run_project_pipeline(self.project, publish_event=self.capture, **options)
+
+    async def recovery_frames(self, *, out_dir, step, **kwargs):
+        frames = []
+        for i, image in enumerate(PNG_FRAMES, 1):
+            path = out_dir / f"step_{step.step_number:02d}_frame_{i}.png"
+            path.write_bytes(image)
+            frames.append(path)
+        return frames
+
+    async def test_slow_cart_is_checkpointed_after_film_and_before_worker_release(self):
+        self.plan.materials = [MaterialItem(id="paper", name="Paper", search_query="origami paper")]
+        cart = ShoppingCartProposal(cart_id="paper-cart", checkout_url="https://shop.example/checkout")
+        film_ready, release_cart = asyncio.Event(), asyncio.Event()
+
+        async def prepare_cart(*, materials):
+            self.assertEqual(materials, self.plan.materials)
+            await release_cart.wait()
+            return cart
+
+        store = await self.enterAsyncContext(open_job_store(self.folder / "guide.sqlite"))
+        await store.enqueue(self.project)
+        self.project = await store.claim("worker")
+
+        checkpoint = store.checkpoint
+
+        async def persist(worker_id, state, event, data):
+            saved = await checkpoint(worker_id, state, event, data)
+            if event == "full_video_ready":
+                film_ready.set()
+            return saved
+
+        with (patch.object(pipeline, "build_shopping_cart_proposal", side_effect=prepare_cart),
+              patch.object(store, "checkpoint", side_effect=persist)):
+            run = asyncio.create_task(cloud_worker.render(store, "worker", self.project, self.settings, hosted=False))
+            try:
+                await asyncio.wait_for(film_ready.wait(), 5)
+                self.assertFalse(self.project.status.terminal)
+                saved, _ = await store.read(self.project.project_id)
+                self.assertTrue(saved.full_video_url)
+                self.assertTrue(all(step.shot_reviews[-1].status == "passed" for step in saved.media.values()))
+            finally:
+                release_cart.set()
+                await run
+        saved, _ = await store.read(self.project.project_id)
+        self.assertEqual((saved.cart, saved.status), (cart, ProjectStatus.COMPLETED))
+        events = await store.events_after(saved.project_id, 0)
+        self.assertEqual([event["event"] for event in events[-3:]], ["full_video_ready", "cart_ready", "status"])
 
     async def test_complete_plan_streams_before_clips_and_full_video_survives_reload(self):
         result = await self.run_project()
@@ -244,6 +297,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             return shot
 
         self.motion.side_effect = film
+        self.frames.side_effect = self.recovery_frames
+        self.client.return_value.generate_structured = AsyncMock(side_effect=TimeoutError)
         with self.assertLogs(pipeline.logger, level="ERROR"):
             result = await self.run_project()
         saved = ProjectState.model_validate_json(result.model_dump_json())
@@ -251,10 +306,22 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(references, {1: None, 2: None, 3: None})
         self.assertEqual([r.status for r in saved.media[1].shot_reviews], ["rejected", "rejected"])
         self.assertIn("withheld", saved.media[1].error)
+        self.assertEqual(saved.media[1].illustration_review.status, "unavailable")
+        self.assertIn("visual review was unavailable", saved.media[1].error)
+        self.assertFalse(list((self.folder / "craft-1").glob("*_frame_*.png")))
         self.assertIsNone(saved.media[1].video_url)
         self.assertEqual(saved.media[2].shot_reviews[-1].status, "unavailable")
         self.assertEqual(saved.media[2].status, "ready")
         self.stitch.assert_not_awaited()
+
+    async def test_serial_visuals_complete_in_guide_order_and_only_share_declared_parent_frames(self):
+        self.settings.max_parallel_shots = 1
+        self.plan.steps[2].visual_parent = 0
+        result = await self.run_project()
+        order = [data["step_number"] for event, data in self.events if event == "step_media_started"]
+        self.assertEqual(result.status, ProjectStatus.COMPLETED)
+        self.assertEqual(order, [1, 2, 3])
+        self.assertEqual(self.references, [None, self.folder / "craft-1/1-motion-end.jpg", None])
 
     async def test_visual_request_limit_applies_to_independent_shots(self):
         for step in self.plan.steps:
@@ -322,7 +389,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
         async def fail_middle(**kwargs):
             if kwargs["step"].step_number == 2:
-                raise RuntimeError("motion unavailable")
+                raise TimeoutError()
             return await original(**kwargs)
 
         self.motion.side_effect = fail_middle
@@ -336,8 +403,67 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.full_video_url)
         self.assertIsNone(result.full_captions_url)
         self.assertTrue(all(a.chapter_start_seconds is None for a in result.media.values()))
-        self.frames.assert_not_awaited()
+        self.frames.assert_awaited_once()
+        error = next(data for event, data in self.events if event == "step_media_error")
+        self.assertEqual(error["motion_failure"], "Motion footage timed out.")
+        self.assertIn("Chapter illustrations could not be generated", error["error"])
+        self.assertTrue(error["audio_url"].endswith("step_02_voice.wav"))
         self.stitch.assert_not_awaited()
+
+    async def test_rejected_motion_uses_only_reviewed_illustrations_and_preserves_history_on_reuse(self):
+        motion = self.motion.side_effect
+        wrong = FrameFinding(verdict="contradicts", sample=1, observation="The paper remains unfolded.")
+
+        async def film(**kwargs):
+            shot = await motion(**kwargs)
+            if kwargs["step"].step_number == 2:
+                raise pipeline.ShotRejected([shot.reviews[0].model_copy(update={"status": "rejected", "result": wrong})])
+            return shot
+
+        review_inputs = []
+        def inspect(*, contents, response_schema, **kwargs):
+            review_inputs.append(contents)
+            if len(review_inputs) == 1:
+                raise TimeoutError()
+            return response_schema.model_validate({
+                name: {"verdict": "matches", "sample": n, "observation": f"Visible {name} on this frame."}
+                for n, name in enumerate(("opening", "contact", "result"), 1)
+            })
+
+        async def assemble(*, out_mp4, frames, **kwargs):
+            self.assertEqual([f.read_bytes() for f in frames], list(PNG_FRAMES))
+            out_mp4.touch()
+            return out_mp4
+
+        self.motion.side_effect = film
+        self.frames.side_effect = self.recovery_frames
+        self.client.return_value.generate_structured = AsyncMock(side_effect=inspect)
+        with patch.object(pipeline, "compose_step_pov_video", side_effect=assemble):
+            result = await self.run_project()
+        self.assertEqual(result.status, ProjectStatus.COMPLETED, result.error)
+        self.assertEqual([a.media_mode for a in result.media.values()], ["motion", "illustrated_frames", "motion"])
+        saved = ProjectState.model_validate_json(result.model_dump_json())
+        asset = saved.media[2]
+        self.assertEqual(asset.illustration_review.status, "passed")
+        self.assertEqual(asset.illustration_review.source_segment_ids, [])
+        self.assertEqual(asset.shot_reviews[0].result, wrong)
+        self.assertIn(wrong.observation, asset.motion_failure)
+        self.assertEqual(asset.keyframe_url, "/media/craft-1/step_02_frame_2.png")
+        self.assertEqual(self.references[-1], self.folder / "craft-1/step_02_frame_3.png")
+        self.assertEqual(self.frames.await_args.kwargs["prev_step_end_frame"], self.folder / "craft-1/1-motion-end.jpg")
+        self.assertEqual(self.frames.await_args.kwargs["correction"], wrong.observation)
+        self.assertEqual(len(review_inputs), 2)
+        self.assertEqual(review_inputs[0], review_inputs[1])
+        self.assertEqual(next(e.state for e in result.activity if e.id == "motion-2"), "failed")
+        self.assertEqual(next(e.state for e in result.activity if e.id == "illustration-2"), "completed")
+        self.assertEqual([data["status"] for event, data in self.events
+                          if event == "step_media_ready" and data["step_number"] == 2], ["ready"])
+        self.assertNotIn("step_media_error", [event for event, _ in self.events])
+        await pipeline.generate_media_for_plan(saved, self.client.return_value, max_steps=1)
+        self.assertTrue(saved.full_video_url)
+        self.assertEqual(saved.media[2], asset)
+        self.assertEqual(saved.media[2].media_mode, "illustrated_frames")
+        self.frames.assert_awaited_once()
 
     async def test_no_voice_keeps_written_plan_and_never_claims_complete(self):
         self.voice.side_effect = RuntimeError("provider failed")
@@ -377,7 +503,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, ProjectStatus.PARTIAL)
         self.assertEqual([asset.status for asset in result.media.values()], ["error", "skipped", "ready"])
 
-    async def test_illustrations_require_explicit_mode_and_cannot_fill_missing_motion(self):
+    async def test_explicit_illustration_and_legacy_chapters_keep_their_original_mode(self):
         self.settings.pov_media_mode = "illustrated_frames"
         async def frames(*, step, bible, out_dir, gemini, prev_step_end_frame):
             return [out_dir / f"{step.step_number}-start.png", out_dir / f"{step.step_number}-end.png"]

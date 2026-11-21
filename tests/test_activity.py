@@ -9,7 +9,7 @@ from nyc_gemini4_hack.agents import researcher
 from nyc_gemini4_hack.config import Settings
 from nyc_gemini4_hack.gemini_client import Gemini4Client
 from nyc_gemini4_hack.job_store import open_job_store
-from nyc_gemini4_hack.models import DecisionResult, ProjectState, ProjectStatus
+from nyc_gemini4_hack.models import DecisionResult, ProjectState, ProjectStatus, ShoppingCartProposal
 from tests.test_planner import grounding, make_plan
 from tests.test_research import extract
 
@@ -22,6 +22,7 @@ class PipelineActivityTests(unittest.IsolatedAsyncioTestCase):
             gemini_model_argon="configured-build-planner", gemini_model_hydrogen="configured-physical-planner",
         ))
         self.enterContext(patch.object(pipeline, "Gemini4Client", return_value=self.gemini))
+        self.enterContext(patch.object(pipeline, "build_shopping_cart_proposal", return_value=ShoppingCartProposal()))
         self.videos = [
             researcher.YouTubeCandidate(key, f"https://youtu.be/{key}", key, "Maker", "")
             for key in ("aaaaaaaaaaa", "bbbbbbbbbbb")

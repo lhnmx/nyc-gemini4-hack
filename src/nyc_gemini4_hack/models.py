@@ -103,6 +103,18 @@ class TutorialExtract(BaseModel):
     segments: list[TutorialSegment] = Field(default_factory=list)
     common_mistakes: list[str] = Field(default_factory=list)
 
+    def source_observations(self, prefix: str) -> list[StepSourceSegment]:
+        observations = []
+        for number, segment in enumerate(self.segments, start=1):
+            window = segment.time_range_seconds
+            if window and segment.hand_action.strip():
+                observations.append(StepSourceSegment(
+                    segment_id=f"{prefix}.{number}", source_url=self.url, source_title=self.title,
+                    start_seconds=window[0], end_seconds=window[1],
+                    **segment.model_dump(include=set(ObservedTechnique.model_fields)),
+                ))
+        return observations
+
 
 class MaterialItem(BaseModel):
     id: str
@@ -189,12 +201,30 @@ class BuildPlan(BaseModel):
         return steps
 
 
+class GlobalProductOption(BaseModel):
+    """Product option discovered across Shopify merchants via Global Catalog MCP."""
+
+    material_id: str = ""
+    material_name: str = ""
+    product_id: str
+    variant_id: str
+    product_title: str
+    merchant: str = ""
+    price: str = "$0.00"
+    price_minor: int = 0
+    currency: str = "USD"
+    product_url: str | None = None
+    image_url: str | None = None
+    available: bool = True
+
+
 class CartLineItem(BaseModel):
     material_id: str
     material_name: str
     product_title: str
     variant_id: str
     price: str
+    quantity: int = 1
     rationale: str | None = None
     product_url: str | None = None
     image_url: str | None = None
@@ -203,7 +233,11 @@ class CartLineItem(BaseModel):
 class ShoppingCartProposal(BaseModel):
     cart_id: str | None = None
     checkout_url: str | None = None
+    store_domain: str | None = None
+    subtotal: str = "$0.00"
+    currency: str = "USD"
     matched_items: list[CartLineItem] = Field(default_factory=list)
+    global_options: list[GlobalProductOption] = Field(default_factory=list)
     unmatched_materials: list[str] = Field(default_factory=list)
 
 
@@ -213,21 +247,25 @@ class FrameFinding(BaseModel):
     observation: str = Field(min_length=1)
 
 
-class ShotReview(BaseModel):
-    attempt: int = Field(ge=1, le=2)
+class VisualReview(BaseModel):
     status: Literal["passed", "rejected", "uncertain", "unavailable"]
     model: str
     source_segment_ids: list[str] = Field(default_factory=list)
-    sampled_seconds: list[float] = Field(default_factory=list)
     opening: FrameFinding | None = None
     contact: FrameFinding | None = None
     result: FrameFinding | None = None
+    review_seconds: float = Field(ge=0)
+    unavailable_reason: str | None = None
+
+
+class ShotReview(VisualReview):
+    attempt: int = Field(ge=1, le=2)
+    sampled_seconds: list[float] = Field(default_factory=list)
     reference_mode: Literal["text", "first_frame", "first_last_frames"]
     target_origin: Literal["reviewed_render", "reviewed_illustration"] | None = None
     target_image_model: str | None = None
     target_preparation_seconds: float | None = Field(default=None, ge=0)
     render_seconds: float = Field(ge=0)
-    review_seconds: float = Field(ge=0)
 
 
 class StepMediaAsset(BaseModel):
@@ -236,6 +274,8 @@ class StepMediaAsset(BaseModel):
     media_mode: Literal["motion", "illustrated_frames"] | None = None
     video_model: str | None = None
     shot_reviews: list[ShotReview] = Field(default_factory=list)
+    motion_failure: str | None = None
+    illustration_review: VisualReview | None = None
     voice_model: str | None = None
     keyframe_url: str | None = None
     video_url: str | None = None
@@ -264,17 +304,20 @@ class ResearchSource(BaseModel):
     gate_name: str
     title: str
     url: str
+    channel: str = ""
+    duration_seconds: int | None = Field(default=None, ge=0)
 
 
 class AgentActivity(BaseModel):
     id: str
-    stage: Literal["research", "planning", "motion", "narration", "assembly"]
+    stage: Literal["research", "planning", "motion", "illustration", "narration", "assembly"]
     state: Literal["started", "completed", "failed"]
     label: str
     agent: str
     model: str | None = None
     detail: str = ""
     sources: list[ResearchSource] = Field(default_factory=list)
+    source_segments: list[StepSourceSegment] = Field(default_factory=list)
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     step_number: int | None = Field(default=None, ge=1)
 
@@ -320,3 +363,42 @@ class CreateProjectRequest(BaseModel):
 
 class RebuildCartRequest(BaseModel):
     owned_material_ids: list[str] = Field(default_factory=list)
+
+
+class ShopifySearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=200)
+    limit: int = Field(default=5, ge=1, le=20)
+    scope: str = Field(default="both")  # "global" | "store" | "both"
+
+
+class ShopifyCartLineRequest(BaseModel):
+    variant_id: str = Field(..., min_length=1)
+    quantity: int = Field(default=1, ge=1, le=99)
+
+
+class ShopifyCartRequest(BaseModel):
+    items: list[ShopifyCartLineRequest] = Field(..., min_length=1)
+
+
+class CoachSessionRequest(BaseModel):
+    current_step: int = Field(default=1, ge=1)
+    plan: BuildPlan | None = None
+
+
+class CoachSessionResponse(BaseModel):
+    ws_url: str
+    model: str
+    voice: str
+    system_instruction: str
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    initial_step: int = Field(default=1, ge=1)
+
+
+class CoachInspectResponse(BaseModel):
+    step_number: int = Field(ge=1)
+    verdict: Literal["PASS", "ADJUST", "REDO", "UNCLEAR"]
+    detected_step_number: int = Field(ge=1)
+    what_i_see: str
+    mistakes: list[str] = Field(default_factory=list)
+    fix: str = ""
+    next_action: str = ""

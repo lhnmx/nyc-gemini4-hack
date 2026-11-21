@@ -2,6 +2,7 @@
 .supplies-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
 .supplies-header #supplies-title { font-size: 1.15rem; line-height: 1.35; }
 .supplies-header .meta { font-size: .78rem; color: var(--muted); }
+.checkout-cart { font-size: .81rem; font-weight: 580; overflow-wrap: anywhere; }
 .supply-group { margin-top: 8px; }
 .supply-group + .supply-group { margin-top: 12px; }
 .supply-group h3 { margin: 0 0 3px; font-size: .76rem; font-weight: 600; color: var(--muted); }
@@ -84,6 +85,7 @@
 .catalog-message { display: flex; flex-wrap: wrap; align-items: center; gap: 0 10px; }
 .catalog-status { color: var(--muted); font-size: .8rem; }
 @media (max-width: 650px), (pointer: coarse) {
+  .checkout-cart { display: inline-flex; align-items: center; min-height: 44px; }
   .supply-check, .catalog-toggle, .catalog-product, .catalog-checkout, .catalog-retry, .catalog-controls button { min-height: 44px; }
   .catalog-controls button, .catalog-controls .catalog-dot { min-width: 44px; }
 }

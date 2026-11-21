@@ -1,7 +1,9 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import { decisionByline, operationLabels, operationState, stageProgress, stateNames } from './activity.js';
-import { graphEdges, graphSources, reviewLabel } from './graphData.js';
+import { graphEdges, reviewLabel } from './graphData.js';
 import { chapterSourceLinks, timeLabel } from './project.js';
+import { sourcePreviewLinks } from './sourcePreview.js';
+import LoopingSourceClip from './LoopingSourceClip.jsx';
 import './agentGraph.css';
 
 const paths = {
@@ -80,7 +82,7 @@ function Edges({ edges, topology, selected }) {
 function graphStages(project, connection, sources) {
   const history = project.activity || [];
   const progress = stageProgress(project, connection);
-  const filmParts = ['motion', 'narration', 'assembly'];
+  const filmParts = ['motion', 'illustration', 'narration', 'assembly'];
   return progress.filter(stage => ['research', 'planning', 'motion'].includes(stage.key)).map(stage => {
     const film = stage.key === 'motion';
     const parts = film ? filmParts : [stage.key];
@@ -91,7 +93,7 @@ function graphStages(project, connection, sources) {
       .find(state => partStates.includes(state));
     if (film && state === 'waiting' && project.status === 'generating') state = connection ? 'offline' : 'active';
     if (stage.key === 'research' && sources.length && ['waiting', 'unknown'].includes(state)) state = 'recorded';
-    return { id: stage.key, title: film ? 'Film' : stage.name, state, records, current, kind: 'agent' };
+    return { id: stage.key, title: film ? 'Create video guide' : stage.name, state, records, current, kind: 'agent' };
   });
 }
 
@@ -111,9 +113,10 @@ function GraphNode({ node, row, selected, select }) {
   const reviewIcon = ['Failed', 'Skipped'].includes(choice) ? 'skipped'
     : ['Kept', 'Cited', 'Reviewed', 'Analyzed'].includes(choice) ? 'kept' : 'research';
   const subtitle = source && 'Tutorial ' + source.number;
+  const clipStatus = source?.analysisState === 'started' ? 'Analyzing' : source?.clips.length ? clipCount(source.clips.length) : null;
 
   const name = kind === 'review' ? node.title + ' · ' + source.title
-    : kind === 'source' ? subtitle + ' · ' + source.title : node.title + ' · ' + stateNames[node.state];
+    : kind === 'source' ? [subtitle, source.title, clipStatus].filter(Boolean).join(' · ') : node.title + ' · ' + stateNames[node.state];
   return <button type="button" className={'graph-node ' + kind} data-node={node.id} data-state={node.state} data-branch={source?.key}
     data-outcome={choice} style={style} aria-label={name} aria-pressed={selected} aria-controls="graph-detail" onClick={() => select(node.id)}>
     {isStage ? <>
@@ -121,14 +124,74 @@ function GraphNode({ node, row, selected, select }) {
       <span className="node-state"><i />{stateNames[node.state]}</span>
       {node.current?.label && <small className="node-operation">{node.current.step_number && 'Step ' + node.current.step_number + ' · '}{node.current.label}</small>}
     </> : kind === 'source' ? <>
-      <small className="node-type"><Icon name="source" />{source.hasTitle ? subtitle : 'YouTube'}</small><strong title={source.title}>{source.title}</strong>
+      <small className="node-type"><Icon name="source" />YouTube{clipStatus && ' · ' + clipStatus}</small><strong title={source.title}>{source.title}</strong>
     </> : <>
       <strong><Icon name={reviewIcon} />{node.title}</strong>
     </>}
   </button>;
 }
 
-function SourceDetail({ source }) {
+function clipCount(count) {
+  return count + (count === 1 ? ' clip' : ' clips');
+}
+
+function SourcePlayer({ url, title, clip }) {
+  const links = sourcePreviewLinks(url, clip);
+  return <div className="workflow-preview">
+    <LoopingSourceClip url={url} segment={clip || null} title={title} />
+    <p>If playback is restricted, <a href={links.href} target="_blank" rel="noreferrer">
+      {clip ? 'open the clip on YouTube' : 'open the tutorial on YouTube'} <Icon name="external" /></a>.</p>
+  </div>;
+}
+
+function SourceFootage({ source, playing, togglePreview, stopPreview }) {
+  const preview = playing?.owner === 'graph' && playing.url === source.url ? playing.interval : null;
+  const links = sourcePreviewLinks(source.url);
+  if (!links) return source.hasTitle && <a href={'https://www.youtube.com/results?search_query=' + encodeURIComponent(source.title)}
+    target="_blank" rel="noreferrer">Search YouTube for this title <Icon name="external" /></a>;
+
+  function toggle(key) {
+    togglePreview('graph', source.url, key);
+  }
+  function clipRow(clip) {
+    const interval = timeLabel(clip.start_seconds) + '–' + timeLabel(clip.end_seconds);
+    const title = clip.technique || 'Source footage';
+    const open = preview === interval;
+    return <li key={interval}>
+      <button type="button" className="graph-clip" onClick={() => toggle(interval)} aria-expanded={open}
+        aria-label={(open ? 'Close preview of ' : 'Preview ') + title + ', ' + interval}>
+        <Icon name="source" /><span>{interval}</span><strong>{title}</strong>
+      </button>
+      {clip.hand_action && <p>{clip.hand_action}</p>}
+      {clip.tools_visible?.length > 0 && <p className="clip-tools">Visible tools · {clip.tools_visible.join(', ')}</p>}
+      {clip.notes && <p>{clip.notes}</p>}
+      {open && <SourcePlayer url={source.url} title={source.title + ' · ' + title + ' · ' + interval} clip={clip} />}
+    </li>;
+  }
+  const clips = source.clips;
+  const full = preview === 'tutorial';
+  return <div className="source-footage">
+    <div className="source-links">
+      <button type="button" className="graph-preview-button" onClick={() => toggle('tutorial')} aria-expanded={full}>
+        <Icon name="source" />{full ? 'Close tutorial preview' : 'Preview tutorial'}
+      </button>
+      <a href={links.href} target="_blank" rel="noreferrer">Watch on YouTube <Icon name="external" /></a>
+    </div>
+    {full && <SourcePlayer url={source.url} title={source.title + ' · Tutorial preview'} />}
+    {clips.length > 0 && <div className="observed-clips">
+      <h4>Observed clips</h4>
+      <ul>{clipRow(clips[0])}</ul>
+      {clips.length > 1 && <details className="graph-more" onToggle={event => {
+        if (!event.currentTarget.open && preview !== 'tutorial'
+          && preview !== timeLabel(clips[0].start_seconds) + '–' + timeLabel(clips[0].end_seconds)) stopPreview('graph');
+      }}>
+        <summary>{clips.length - 1} more {clips.length === 2 ? 'clip' : 'clips'}</summary><ul>{clips.slice(1).map(clipRow)}</ul>
+      </details>}
+    </div>}
+  </div>;
+}
+
+function SourceDetail({ source, reviewing, playing, togglePreview, stopPreview }) {
   const { decision, analysis } = source;
   const choice = reviewLabel(source);
   const nativeScore = decision?.rationale?.startsWith('Decisions API probabilities:') || decision?.rationale === 'Decisions API choice';
@@ -145,18 +208,24 @@ function SourceDetail({ source }) {
   const observation = analysis?.detail?.startsWith(source.title + ' · ') ? analysis.detail.slice(source.title.length + 3) : analysis?.detail;
   const match = Number.isFinite(decision?.confidence) ? Math.round(decision.confidence * 100) + '% confidence' : null;
   const badge = decision ? decisionByline(decision) : null;
+  const attribution = <>
+    {reason && <p>{reason}</p>}
+    {observation && !source.clips.length && <p className="detail-observation">{observation}</p>}
+    {analysis && <div className="operation-credit">{[analysis.agent, analysis.model, operationLabels[source.analysisState]].filter(Boolean).join(' · ')}</div>}
+    {(badge || match) && <div className="detail-badges">{[badge, match].filter(Boolean).map(text => <span key={text}>{text}</span>)}</div>}
+  </>;
   return <>
     <div className="detail-eyebrow"><span>Tutorial {source.number}</span><span className="detail-outcome" data-outcome={choice}>{choice}</span>
       {source.cited && choice !== 'Cited' && <span className="detail-cited">Cited in plan</span>}</div>
     <h3>{source.title}</h3>
-    {reason && <p>{reason}</p>}
-    {observation && <p className="detail-observation">{observation}</p>}
-    {analysis && <div className="operation-credit">{[analysis.agent, analysis.model, operationLabels[source.analysisState]].filter(Boolean).join(' · ')}</div>}
+    {(source.channel || source.duration_seconds > 0) && <p className="detail-byline">
+      {[source.channel, source.duration_seconds > 0 && timeLabel(source.duration_seconds)].filter(Boolean).join(' · ')}
+    </p>}
+    {reviewing && attribution}
     {source.cited && !decision && !analysis && <p>The build plan lists this tutorial as a source.</p>}
-    {(badge || match) && <div className="detail-badges">{[badge, match].filter(Boolean).map(text => <span key={text}>{text}</span>)}</div>}
-    {source.url ? <a href={source.url} target="_blank" rel="noreferrer">Watch on YouTube <Icon name="external" /></a>
-      : source.hasTitle && <a href={'https://www.youtube.com/results?search_query=' + encodeURIComponent(source.title)}
-        target="_blank" rel="noreferrer">Search YouTube for this title <Icon name="external" /></a>}
+    <SourceFootage source={source} playing={playing} togglePreview={togglePreview} stopPreview={stopPreview} />
+    {!reviewing && (source.clips.length && (analysis || decision)
+      ? <details className="graph-more"><summary>Research details</summary>{attribution}</details> : attribution)}
   </>;
 }
 
@@ -200,12 +269,14 @@ function StageDetail({ stage, project, connection }) {
   </>;
 }
 
-export default function AgentGraph({ project, connection, playback }) {
+export default function AgentGraph({ project, connection, playback, sources, playing, togglePreview, stopPreview, replayPreview, progress }) {
   const section = useRef(null);
   const disclosure = useRef(null);
   const [picked, setPicked] = useState(null);
   const [allSources, setAllSources] = useState(false);
   const [focusedBranch, setFocusedBranch] = useState(null);
+  const [expanded, setExpanded] = useState(!playback);
+  const [replay, setReplay] = useState(false);
   useLayoutEffect(() => {
     const control = disclosure.current;
     const reveal = () => {
@@ -219,25 +290,47 @@ export default function AgentGraph({ project, connection, playback }) {
     window.addEventListener('hashchange', reveal);
     return () => window.removeEventListener('hashchange', reveal);
   }, [playback]);
-  const sources = graphSources(project, connection);
+  const totalClips = sources.reduce((count, source) => count + source.clips.length, 0);
   const stages = graphStages(project, connection, sources);
   const inspectedSource = sources.find(source => picked === 'source-' + source.key || picked === 'review-' + source.key);
   const featured = sources.find(source => source.key === focusedBranch) || inspectedSource
-    || sources.find(source => source.analysisState === 'started') || sources.find(source => source.cited)
+    || sources.find(source => source.analysisState === 'started') || sources.find(source => source.clips.length) || sources.find(source => source.cited)
     || sources.find(source => source.decision?.choice === 'KEEP_TUTORIAL') || sources[0];
   const visible = allSources ? sources : featured ? [featured] : [];
   const nodes = graphNodes(stages, visible);
   const edges = graphEdges(visible, project);
   const selection = nodes.find(node => node.id === picked);
   const highlight = selection || stages.find(stage => ['active', 'offline'].includes(stage.state));
-  const select = id => setPicked(previous => previous === id ? null : id);
+  function select(id) {
+    stopPreview('graph');
+    setPicked(previous => previous === id ? null : id);
+  }
+  function toggleReplay() {
+    if (replay) stopPreview('research');
+    else {
+      disclosure.current.open = true;
+      setExpanded(true);
+    }
+    setReplay(!replay);
+  }
   return <section id="workflow" ref={section} className="agent-graph" aria-label="Workflow" tabIndex="-1"
     onFocus={event => setFocusedBranch(event.target.closest('[data-branch]')?.dataset.branch || null)}
     onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusedBranch(null); }}>
-    <details ref={disclosure} className="graph-disclosure">
+    <div className="graph-shell" data-replay={Boolean(replayPreview)}>
+    <details ref={disclosure} className="graph-disclosure" onToggle={event => {
+      if (event.target !== disclosure.current) return;
+      setExpanded(disclosure.current.open);
+      if (!disclosure.current.open) {
+        setReplay(false);
+        stopPreview('graph');
+        if (replayPreview) stopPreview('research');
+      }
+    }}>
       <summary><Icon name="graph" /><span>Workflow</span>
-        {!!sources.length && <small>{sources.length} {sources.length === 1 ? 'source' : 'sources'}</small>}
+        {!!sources.length && <small>{sources.length} {sources.length === 1 ? 'source' : 'sources'}{totalClips > 0 && ' · ' + clipCount(totalClips)}</small>}
       </summary>
+      {progress}
+      {replay && expanded && replayPreview}
       <div className="graph-frame">
         <div className="graph-board" data-empty={!visible.length}
           style={{ '--rows': Math.max(visible.length, 1), '--mobile-plan': visible.length + 2, '--mobile-motion': visible.length + 3 }}>
@@ -249,11 +342,16 @@ export default function AgentGraph({ project, connection, playback }) {
           onClick={() => setAllSources(value => !value)}>
           {allSources ? 'Show one source' : 'Show all ' + sources.length + ' sources'}
         </button>}
-        <div className="graph-detail" id="graph-detail" hidden={!selection} role="region" aria-label="Selected node details" aria-live="polite">
-          {selection && (selection.source ? <SourceDetail source={selection.source} /> :
+        <div className="graph-detail" id="graph-detail" hidden={!selection} role="region" aria-label="Selected node details">
+          {selection && expanded && (selection.source ? <SourceDetail key={selection.source.key} source={selection.source}
+            reviewing={selection.kind === 'review'} playing={playing} togglePreview={togglePreview} stopPreview={stopPreview} /> :
             <StageDetail stage={selection} project={project} connection={connection} />)}
         </div>
       </div>
     </details>
+    {replayPreview && <button type="button" className="research-replay" aria-expanded={replay && expanded} onClick={toggleReplay}>
+      <span aria-hidden="true">↻</span>{replay && expanded ? 'Close replay' : 'Replay research'}
+    </button>}
+    </div>
   </section>;
 }

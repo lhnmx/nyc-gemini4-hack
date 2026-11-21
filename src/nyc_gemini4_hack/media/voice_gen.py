@@ -19,13 +19,15 @@ from nyc_gemini4_hack.media.composer import run_media_work
 logger = logging.getLogger(__name__)
 
 
-def _check_wav(path: Path) -> None:
+def validate_narration_wav(path: Path) -> None:
     with wave.open(str(path), "rb") as recording:
         frames = recording.getnframes()
         frame_size = recording.getnchannels() * recording.getsampwidth()
         if not frames or recording.getframerate() <= 0:
             raise ValueError("The narration recording is empty or incomplete.")
-        if len(recording.readframes(frames)) != frames * frame_size:
+        # PCM frames are contiguous. Check the last declared frame to catch truncation.
+        recording.setpos(frames - 1)
+        if len(recording.readframes(1)) != frame_size:
             raise ValueError("The narration recording is empty or incomplete.")
 
 
@@ -59,7 +61,7 @@ def _write_audio(audio, out_wav: Path) -> None:
         ], input=raw, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30, check=True)
     else:
         raise ValueError(f"Unsupported speech audio format: {mime}")
-    _check_wav(out_wav)
+    validate_narration_wav(out_wav)
 
 
 async def _generate_gemini_audio(
@@ -106,7 +108,7 @@ def _generate_local_tts(script: str, out_wav: Path) -> str:
     # stdin keeps the transcript separate from voice options.
     subprocess.run(cmd, input=script + "\n", text=True, stdout=subprocess.DEVNULL,
                    stderr=subprocess.PIPE, check=True, timeout=30)
-    _check_wav(out_wav)
+    validate_narration_wav(out_wav)
     return Path(cmd[0]).name
 
 

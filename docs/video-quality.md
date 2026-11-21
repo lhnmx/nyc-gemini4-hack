@@ -23,6 +23,10 @@ The worker decodes images from the actual output across the shot, including its 
 
 A clearly contradicted action gets at most one corrective take. The worker withholds footage after an unsuccessful correction. A first take with insufficient evidence or an unavailable reviewer is recorded accordingly and cannot supply a verified reference frame to its child. Sampling can miss events between frames. Readers can compare a tricky movement with its linked tutorial.
 
+When motion generation fails or a corrected take is withheld, the worker prepares one illustrated sequence of the opening, the point of contact and the result. It can reuse the opening and contact from a single take if the reviewer individually confirmed those frames. The image generator receives the chapter’s physical plan, its source observations and any observed errors as it creates the missing images.
+
+A separate visual review checks all three images together. Large stills are sent at chapter playback resolution. If the review times out or the provider has a temporary outage, the worker retries the review once using the same images. Only a sequence that passes all three checks enters the film. The chapter retains its narration, captions and position. Its record identifies the image model, the illustration review and the reason motion failed. When the illustrations also fail, the written guide and any completed narration remain available.
+
 ## Verification
 
 A live calibration used three short slider demonstrations with a visible physical stop. Gemini Carbon accepted two recordings where the moving piece reached the stop, including one on a different surface. It rejected the third and identified the gap left at the end. Reviews took about 10–14 seconds apiece. This small check measures those three known outcomes. It does not establish a general craft accuracy rate.

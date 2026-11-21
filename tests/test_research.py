@@ -110,6 +110,14 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn(goal, call.kwargs["context"])
                     self.assertEqual(list(call.kwargs["questions"]), [f"video_{i}_relevance"])
                 events = [c.args[0] for c in report.await_args_list]
+                analysis = [e for e in events if e.id == "analyze-bbbbbbbbbbb"]
+                self.assertEqual(analysis[0].source_segments, [])
+                self.assertEqual(len(analysis[-1].source_segments), 1)
+                clip = analysis[-1].source_segments[0]
+                self.assertEqual((clip.source_url, clip.source_title, clip.start_seconds, clip.end_seconds,
+                                  clip.hand_action), (second.url, second.title, 2, 5, "Flatten the crease"))
+                for failed in (e for e in events if e.state == "failed"):
+                    self.assertEqual(failed.source_segments, [])
                 for key in ["source-search", "source-selection", "source-search-2", "source-selection-2"]:
                     self.assertEqual([e.state for e in events if e.id == key], ["started", "completed"])
                 for suffix, decision in zip(["", "-2"], decisions, strict=True):
@@ -119,7 +127,7 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(done.sources, screen.sources)
                     self.assertEqual([s.model_dump() for s in screen.sources],
                                      [{"gate_name": decision.gate_name, "title": decision.source_title,
-                                       "url": decision.source_url}])
+                                       "url": decision.source_url, "channel": "Maker", "duration_seconds": None}])
                 self.assertEqual([e.detail for e in events if e.id.startswith("source-search") and e.state == "started"],
                                  ["Weave a round coaster step by step tutorial", "Weave a round coaster"])
                 analyzed = [call.kwargs["contents"][0].file_data.file_uri for call in service.generate_structured.await_args_list]

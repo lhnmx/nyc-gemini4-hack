@@ -3,24 +3,62 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import wave
 from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 import httpx
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi import Path as ApiPath
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from vercel import blob
 
 from nyc_gemini4_hack import blob_media
+from nyc_gemini4_hack.agents.coach import create_live_coach_session, inspect_workpiece_frame
+from nyc_gemini4_hack.agents.commerce import (
+    build_shopping_cart_proposal,
+    create_mock_store_cart,
+    search_shopify_products,
+)
 from nyc_gemini4_hack.config import Settings, get_settings
 from nyc_gemini4_hack.intake import creation_response, prepare_project
 from nyc_gemini4_hack.job_store import JobStore, JobStoreError, open_job_store
-from nyc_gemini4_hack.models import ProjectState, ProjectStatus, RebuildCartRequest
+from nyc_gemini4_hack.media.voice_gen import validate_narration_wav
+from nyc_gemini4_hack.models import (
+    BuildPlan,
+    CoachInspectResponse,
+    CoachSessionRequest,
+    CoachSessionResponse,
+    MaterialStatus,
+    ProjectState,
+    ProjectStatus,
+    RebuildCartRequest,
+    ShopifyCartRequest,
+    ShopifySearchRequest,
+    ShoppingCartProposal,
+)
 from nyc_gemini4_hack.shopping import catalog_config, shopping_router
 
+logger = logging.getLogger(__name__)
 ProjectId = Annotated[str, ApiPath(pattern=r"^[a-zA-Z0-9_-]+$", max_length=96)]
+
+
+def _load_example_plan() -> BuildPlan | None:
+    package_root = Path(__file__).resolve().parent
+    candidates = [
+        package_root / "web" / "example" / "project.json",
+        package_root.parent.parent / "frontend" / "dist" / "static" / "example" / "project.json",
+        package_root.parent.parent / "frontend" / "public" / "static" / "example" / "project.json",
+    ]
+    for path in candidates:
+        if path.is_file():
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if raw.get("plan"):
+                return BuildPlan.model_validate(raw["plan"])
+    return None
 
 
 def store_connection(request: Request) -> JobStore:
@@ -116,12 +154,35 @@ def create_app(*, hosted: bool = False, settings: Settings | None = None) -> Fas
             request.app.state.wake.set()
         return creation_response(state)
 
+    def playback_snapshot(row: Loaded) -> tuple[ProjectState, int]:
+        state, _ = row
+        if hosted or not state.status.terminal:
+            return row
+
+        # Older local guides saved the finished recording even when the visual failed.
+        directory = settings.media_output_dir.resolve() / state.project_id
+        for entry in state.activity:
+            if entry.stage != "narration" or entry.state != "completed" or entry.step_number is None:
+                continue
+            asset = state.media.get(entry.step_number)
+            if asset is None or asset.status != "error" or asset.audio_url:
+                continue
+            wav = directory / f"step_{entry.step_number:02d}_voice.wav"
+            try:
+                if not wav.resolve().is_relative_to(directory) or not wav.is_file():
+                    continue
+                validate_narration_wav(wav)
+            except (OSError, EOFError, RuntimeError, ValueError, wave.Error):
+                continue
+            asset.audio_url = f"/media/{state.project_id}/{wav.name}"
+        return row
+
     @app.get("/api/projects/{project_id}")
-    async def get_project(row: Loaded) -> ProjectState:
+    async def get_project(row=Depends(playback_snapshot)) -> ProjectState:
         return row[0]
 
     @app.get("/api/projects/{project_id}/events")
-    async def stream_project_events(row: Loaded, store: Store):
+    async def stream_project_events(store: Store, row=Depends(playback_snapshot)):
         state, last_revision = row
 
         async def events():
@@ -165,14 +226,123 @@ def create_app(*, hosted: bool = False, settings: Settings | None = None) -> Fas
             raise HTTPException(404, "Media not found") from None
         return RedirectResponse(url, headers={"Cache-Control": "private, no-store"})
 
-    @app.post("/api/projects/{project_id}/cart/rebuild")
-    async def rebuild_cart(row: Loaded, body: RebuildCartRequest) -> dict[str, object]:
+    @app.post("/api/projects/{project_id}/cart/rebuild", response_model=ShoppingCartProposal)
+    async def rebuild_cart(row: Loaded, store: Store, body: RebuildCartRequest) -> ShoppingCartProposal:
         project, _ = row
+        if project.plan is None:
+            raise HTTPException(status_code=400, detail="Project plan is not ready yet")
+
+        owned_set = set(body.owned_material_ids)
+        for mat in project.plan.materials:
+            mat.status = MaterialStatus.OWNED_EXACT if mat.id in owned_set else MaterialStatus.BUY
+
+        cart = await build_shopping_cart_proposal(
+            materials=project.plan.materials,
+            owned_material_ids=owned_set,
+            settings=settings,
+        )
+        project.cart = cart
+        if not await store.update_cart(project):
+            raise HTTPException(404, "Project not found")
+        return cart
+
+    @app.post("/api/shopify/search")
+    async def shopify_search(body: ShopifySearchRequest) -> dict[str, object]:
+        """Reusable standalone endpoint: search Global Catalog MCP and/or mock dev store."""
+        results = await search_shopify_products(
+            query=body.query,
+            limit=body.limit,
+            scope=body.scope,
+            settings=settings,
+        )
         return {
-            "project_id": project.project_id,
-            "owned_material_ids": body.owned_material_ids,
-            "message": "Shopify MCP cart rebuild will be wired in Slice 3.",
+            "query": body.query,
+            "scope": body.scope,
+            "global_options": [opt.model_dump() for opt in results["global"]],
+            "store_options": [opt.model_dump() for opt in results["store"]],
         }
+
+    @app.post("/api/shopify/cart", response_model=ShoppingCartProposal)
+    async def shopify_create_cart(body: ShopifyCartRequest) -> ShoppingCartProposal:
+        """Reusable standalone endpoint: create a live checkout cart on the mock dev store."""
+        try:
+            return await create_mock_store_cart(body.items, settings=settings)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/projects/{project_id}/coach/session", response_model=CoachSessionResponse)
+    async def coach_session(
+        request: Request,
+        project_id: ProjectId,
+        body: CoachSessionRequest = Body(default_factory=CoachSessionRequest),
+    ) -> CoachSessionResponse:
+        if not settings.gemini_api_key.strip():
+            raise HTTPException(503, "Live coach requires GEMINI_API_KEY on the server.")
+        plan: BuildPlan | None = None
+        if project_id == "example":
+            plan = body.plan or _load_example_plan()
+            if plan is None:
+                raise HTTPException(404, "Example guide plan could not be loaded.")
+        else:
+            store = store_connection(request)
+            project, _ = await load_project(project_id, store)
+            if project.plan is None:
+                raise HTTPException(400, "Project plan is not ready yet.")
+            plan = project.plan
+        try:
+            return await create_live_coach_session(plan, settings, current_step=body.current_step)
+        except Exception as exc:
+            logger.exception("Failed to create live coach session for %s", project_id)
+            raise HTTPException(502, "Could not start live coach session.") from exc
+
+    @app.post("/api/projects/{project_id}/coach/inspect", response_model=CoachInspectResponse)
+    async def coach_inspect(
+        request: Request,
+        project_id: ProjectId,
+        step_number: int = Form(default=1, ge=1),
+        user_question: str = Form(default=""),
+        plan_json: str = Form(default=""),
+        frame: UploadFile = File(...),
+        reference_frame: UploadFile | None = File(default=None),
+    ) -> CoachInspectResponse:
+        if not settings.gemini_api_key.strip():
+            raise HTTPException(503, "Live coach inspection requires GEMINI_API_KEY on the server.")
+        plan: BuildPlan | None = None
+        if project_id == "example":
+            if plan_json.strip():
+                plan = BuildPlan.model_validate_json(plan_json)
+            else:
+                plan = _load_example_plan()
+            if plan is None:
+                raise HTTPException(404, "Example guide plan could not be loaded.")
+        else:
+            store = store_connection(request)
+            project, _ = await load_project(project_id, store)
+            if project.plan is None:
+                raise HTTPException(400, "Project plan is not ready yet.")
+            plan = project.plan
+
+        frame_bytes = await frame.read()
+        if not frame_bytes:
+            raise HTTPException(400, "Webcam frame is empty.")
+        frame_mime = frame.content_type or "image/jpeg"
+        ref_bytes = await reference_frame.read() if reference_frame is not None else None
+        ref_mime = (reference_frame.content_type or "image/jpeg") if reference_frame is not None else "image/jpeg"
+
+        try:
+            return await inspect_workpiece_frame(
+                plan=plan,
+                step_number=step_number,
+                frame_bytes=frame_bytes,
+                frame_mime=frame_mime,
+                settings=settings,
+                reference_bytes=ref_bytes or None,
+                reference_mime=ref_mime,
+                user_question=user_question,
+            )
+        except Exception as exc:
+            logger.exception("Failed to inspect workpiece for %s", project_id)
+            raise HTTPException(502, "Could not inspect the webcam frame.") from exc
 
     @app.post("/api/projects/{project_id}/steps/{step_number}/checkin")
     async def step_checkin(row: Loaded, step_number: int, frame: UploadFile = File(...)):

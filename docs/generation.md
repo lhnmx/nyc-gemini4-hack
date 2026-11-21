@@ -1,12 +1,12 @@
 # Video generation speed and continuity
 
-Independent workpieces can render at the same time. Each fold of a single paper glider still starts with the real final frame of its preceding fold. Every chapter becomes playable as soon as its narration and captions are ready.
+By default, the worker renders and reviews one chapter’s visuals at a time in guide order. A fold can start from the verified final frame of the preceding fold. Each chapter becomes playable as soon as its narration and captions are ready.
 
 ## What changed
 
 The grounded plan records which shot supplies each chapter's opening frame. A value of `-1` in `visual_parent` continues the preceding chapter, `0` starts an independent setup, and a positive value names the earlier chapter whose workpiece is returning to camera. Older plans default to the preceding chapter. Each setup uses the same description of the maker, work surface, framing and lighting.
 
-The worker samples each downloaded shot on the 24 fps playback timeline. When visual review passes, its child can start with that final frame while narration, captions and encoding finish. A child whose parent has no verified frame uses its written opening state. Independent sequences share up to two active visual jobs per project. Set `MAX_PARALLEL_SHOTS` to a value from 1 through 4 to adjust this limit. Narration and chapter assembly each have a separate limit of two active jobs. [Visual review and source attribution](video-quality.md)
+The worker samples each downloaded shot on the 24 fps playback timeline. When visual review passes, its child can start with that final frame while narration, captions and encoding finish. A child whose parent has no verified frame uses its written opening state. Set `MAX_PARALLEL_SHOTS` to 2, 3 or 4 to render independent workpieces concurrently. Narration and chapter assembly each have a separate limit of two active jobs. [Visual review and source attribution](video-quality.md)
 
 The workbench receives a chapter's start event when a visual slot opens and its ready event once its playable files are published. A later chapter can become ready before an earlier chapter. The full film, combined captions and chapter seek positions always use the plan's order.
 

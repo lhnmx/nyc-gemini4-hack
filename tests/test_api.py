@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+import wave
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -12,7 +13,7 @@ from fastapi.testclient import TestClient
 from nyc_gemini4_hack import blob_media, cloud_worker
 from nyc_gemini4_hack.config import Settings
 from nyc_gemini4_hack.job_store import open_job_store
-from nyc_gemini4_hack.models import ProjectState, ProjectStatus, StepMediaAsset
+from nyc_gemini4_hack.models import AgentActivity, ProjectState, ProjectStatus, StepMediaAsset
 from nyc_gemini4_hack.server import create_app
 from tests.test_pipeline import paper_plan
 
@@ -71,9 +72,11 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(client.get("/api/projects/unknown/events").status_code, 404)
             created = client.post("/api/projects", data={"goal": "Fold a glider"}).json()
             path = f"/api/projects/{created['project_id']}"
-            self.assertEqual(client.post(path + "/cart/rebuild", json={}).json()["owned_material_ids"], [])
-            self.assertEqual(client.post(path + "/steps/1/checkin", files={"frame": ("f.jpg", b"f")}).status_code, 501)
             client.get(created["events_url"])
+            rebuilt = client.post(path + "/cart/rebuild", json={})
+            self.assertEqual(rebuilt.status_code, 200)
+            self.assertEqual(rebuilt.json()["matched_items"], [])
+            self.assertEqual(client.post(path + "/steps/1/checkin", files={"frame": ("f.jpg", b"f")}).status_code, 501)
 
     def test_local_media_from_an_earlier_cli_run(self):
         folder = self.settings.media_output_dir / "saved-run"
@@ -81,6 +84,50 @@ class ApiTests(unittest.TestCase):
         (folder / "clip.mp4").write_bytes(b"previous movie")
         with TestClient(create_app(settings=self.settings)) as client:
             self.assertEqual(client.get("/media/saved-run/clip.mp4").content, b"previous movie")
+
+    def test_legacy_narration_is_recovered_only_in_local_playback_snapshots(self):
+        settings = self.settings.model_copy(update={"gemini_api_key": ""})
+        project = ProjectState(project_id="saved-guide", goal="Fold paper", status=ProjectStatus.PARTIAL)
+        directory = settings.media_output_dir / project.project_id
+        directory.mkdir(parents=True)
+        recording = directory / "step_01_voice.wav"
+        with wave.open(str(recording), "wb") as wav:
+            wav.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+            wav.writeframes(bytes(480))
+        for number, state in enumerate(("completed", "completed", "failed", "completed"), 1):
+            project.media[number] = StepMediaAsset(step_number=number, status="error")
+            project.activity.append(AgentActivity(
+                id=f"narration-{number}", stage="narration", state=state, step_number=number,
+                label="Chapter narration", agent="Speech generator",
+            ))
+        (directory / "step_02_voice.wav").write_bytes(recording.read_bytes()[:-2])
+        (directory / "step_03_voice.wav").write_bytes(recording.read_bytes())
+
+        async def save():
+            async with open_job_store(settings.sqlite_path) as store:
+                await store.enqueue(project)
+
+        asyncio.run(save())
+        path = f"/api/projects/{project.project_id}"
+        with TestClient(create_app(settings=settings)) as client:
+            snapshot = client.get(path).json()
+            record = client.get(path + "/events").text.split("\n\n", 1)[0]
+            self.assertEqual(record.splitlines()[0], "event: snapshot")
+            self.assertEqual(json.loads(record.split("\ndata: ", 1)[1]), snapshot)
+            url = f"/media/{project.project_id}/{recording.name}"
+            self.assertEqual([snapshot["media"][str(i)]["audio_url"] for i in range(1, 5)], [url, None, None, None])
+            self.assertEqual(client.get(url).content, recording.read_bytes())
+
+        async def read_saved():
+            async with open_job_store(settings.sqlite_path) as store:
+                return await store.read(project.project_id)
+
+        self.assertEqual(asyncio.run(read_saved()), (project, 0))
+        # Use the same saved project and files to demonstrate the hosted view only exposes published assets.
+        with (patch.dict(os.environ, {"TURSO_DATABASE_URL": "libsql://test.invalid", "TURSO_AUTH_TOKEN": "test"}),
+              patch("nyc_gemini4_hack.server.open_job_store", lambda _: open_job_store(settings.sqlite_path)),
+              TestClient(create_app(hosted=True, settings=settings)) as hosted):
+            self.assertIsNone(hosted.get(path).json()["media"]["1"]["audio_url"])
 
     def test_hosted_api_worker_and_second_api_share_the_project(self):
         # Each app entrypoint and the worker opens its own store connection.

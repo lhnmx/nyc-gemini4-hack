@@ -17,6 +17,7 @@ from nyc_gemini4_hack.gemini_client import Gemini4Client
 from nyc_gemini4_hack.media.motion_gen import (
     ShotRejected, _shot_prompt, compose_motion_with_voice, generate_motion_shot, generate_step_motion,
 )
+from nyc_gemini4_hack.media.video_gen import generate_step_pov_frames
 from nyc_gemini4_hack.models import BuildStep, PhysicalStateTransition, StepSourceSegment, VisualContinuityBible
 from tests.test_video import PNG_FRAMES, decode, write_tone
 
@@ -267,6 +268,10 @@ class MotionTests(unittest.IsolatedAsyncioTestCase):
                 motion = await generate_motion_shot(self.step, self.bible, self.folder, await self.client_with(transport))
                 expected = "unavailable" if status == "invalid_evidence" else status
                 self.assertEqual([r.status for r in motion.reviews], [expected])
+                if status == "unavailable":
+                    self.assertIn("403", motion.reviews[0].unavailable_reason)
+                elif status == "invalid_evidence":
+                    self.assertIn("frame observations", motion.reviews[0].unavailable_reason)
                 self.assertIsNone(motion.continuity_frame)
                 self.assertEqual(len(renders), 1)
                 self.assertEqual(motion.video.read_bytes(), video)
@@ -301,6 +306,50 @@ class MotionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(renders), 2)
                 self.assertEqual(existing.read_bytes(), b"prior usable shot")
                 self.assertEqual(previous_end.read_bytes(), b"prior usable reference")
+
+    async def test_illustrations_reuse_only_confirmed_setup_and_contact_from_the_same_take(self):
+        source = moving_shot(self.folder / "source.mp4")
+        positions = bar_locations(source)
+        previous = self.folder / "previous.png"
+        previous.write_bytes(PNG_FRAMES[0])
+        takes, images = [], []
+        error = "The result shows a slit through the attached mound."
+
+        def transport(request):
+            body = json.loads(request.content)
+            if request.url.path.endswith("/interactions"):
+                takes.append(body)
+                return motion_response(source.read_bytes())
+            if "responseSchema" in body["generationConfig"]:
+                findings = sample_findings()
+                if len(takes) == 1:
+                    findings["opening"]["verdict"] = "contradicts"
+                findings["result"].update(verdict="contradicts", observation=error)
+                return structured_response(findings)
+            images.append(body["contents"][0]["parts"])
+            return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"inlineData": {
+                "mimeType": "image/png", "data": base64.b64encode(PNG_FRAMES[2]).decode(),
+            }}]}}]})
+
+        client = await self.client_with(transport)
+        with self.assertRaises(ShotRejected) as failure:
+            await generate_motion_shot(self.step, self.bible, self.folder, client, previous)
+        rejection = failure.exception
+        self.assertEqual(len(takes), 2)
+        self.assertEqual(rejection.reviews[1].contact.sample, 4)
+        self.assertEqual(len(rejection.reviewed_prefix), 2)
+        frames = await generate_step_pov_frames(
+            self.step, self.bible, self.folder, client, reviewed_prefix=rejection.reviewed_prefix, correction=error,
+        )
+        self.assertEqual([frame.read_bytes() for frame in frames[:2]], list(rejection.reviewed_prefix))
+        self.assertAlmostEqual(bar_locations(frames[0])[0], positions[0], delta=1)
+        self.assertAlmostEqual(bar_locations(frames[1])[0], positions[12], delta=1)
+        self.assertEqual(frames[2].read_bytes(), PNG_FRAMES[2])
+        self.assertEqual(len(images), 1)
+        reference, prompt = images[0]
+        self.assertEqual(base64.urlsafe_b64decode(reference["inlineData"]["data"]), frames[1].read_bytes())
+        self.assertIn(error, prompt["text"])
+        self.assertFalse((self.folder / "step_01_motion.mp4").exists())
 
     async def test_rejected_target_is_excluded_from_the_correction_request(self):
         video = moving_shot(self.folder / "moving.mp4").read_bytes()

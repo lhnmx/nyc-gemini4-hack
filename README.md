@@ -87,11 +87,11 @@ flowchart LR
 | Film | Omni shots, Gemini speech, per-chapter MP4s, WebVTT, then one stitched film. Illustrated mode is the other `POV_MEDIA_MODE`. | Built |
 | Workbench | Sidebar chapters, shared player, synchronized reading, source links, checklist in the tab. | Built |
 | Catalog | `GET /api/shopping/search` calls Shopify UCP `search_catalog` and returns up to three offers. | Built |
-| Cart agent | `POST /api/projects/{id}/cart/rebuild` answers with the owned ids and leaves checkout unwired. | Planned |
+| Cart agent | Finds Shopify offers for missing materials while chapters render. Rebuilding the cart updates the owned items and returns a merchant checkout link when the configured store has matching variants. | Built |
 | Desk inventory | The photo is stored with the project. Nothing in the planner looks at it. | Planned |
-| Live coach | `POST /api/projects/{id}/steps/{n}/checkin` returns 501. | Planned |
+| Live coach | Starts a Gemini Live session with the current guide and can inspect a camera frame against a chapter’s expected result. | Built |
 
-The public profile at `/ucp-agent-profile.json` advertises the UCP shopping capabilities (catalog search, lookup, cart, checkout) at spec `2026-08-25`. The path that runs is catalog search. Product and checkout links open on the store.
+The public profile at `/ucp-agent-profile.json` advertises the UCP shopping capabilities at spec `2026-08-25`. The global catalog supplies offers across merchants. Checkout uses variants from the configured store and opens on that store.
 
 ---
 
@@ -175,8 +175,9 @@ Copy [`.env.example`](.env.example).
 | Models | `GEMINI_API_KEY`, `GEMINI_MODEL_ARGON`, `GEMINI_MODEL_CARBON`, `GEMINI_MODEL_NEON`, `GEMINI_MODEL_HYDROGEN` |
 | Gating | `GEMINI_DECISIONS_ENABLED`, `GEMINI_DECISIONS_MODEL`, `GEMINI_DECISIONS_API_VERSION` |
 | Film | `POV_MEDIA_MODE`, `POV_VIDEO_MODEL`, `POV_IMAGE_MODEL`, `AUDIO_MODEL`, `TTS_VOICE` |
+| Live coach | `LIVE_COACH_MODEL`, `LIVE_COACH_API_VERSION` |
 | Discovery | `YOUTUBE_API_KEY` |
-| Catalog | `SHOPIFY_MCP_URL` or `SHOPIFY_SHOP_DOMAIN` selects a store. Empty settings use Shopify’s global UCP catalog. `SHOPIFY_AGENT_PROFILE_URL` can override the published agent profile. |
+| Catalog | `SHOPIFY_GLOBAL_MCP_URL` selects the global catalog. `SHOPIFY_MCP_URL` enables store checkout. `SHOPIFY_SHOP_DOMAIN` can select a store for checklist searches. The store client accepts `SHOPIFY_STOREFRONT_TOKEN`. `SHOPIFY_AGENT_PROFILE_URL` takes precedence over `SHOPIFY_UCP_AGENT_PROFILE_URL`. |
 | Local files | `APP_HOST`, `APP_PORT`, `MEDIA_OUTPUT_DIR`, `SQLITE_PATH` |
 | Hosted | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `BLOB_READ_WRITE_TOKEN` |
 
@@ -189,10 +190,12 @@ Hosted intake accepts a desk photo up to 4 MiB. Local intake accepts 8 MiB.
 ```
 app.py                         Vercel FastAPI entry, hosted=True
 src/nyc_gemini4_hack/
-  server.py                    Projects, SSE, media, cart stub, check-in stub
+  server.py                    Projects, live updates, media, shopping and coaching routes
   pipeline.py                  Research → plan → film
   agents/researcher.py         YouTube search, Decisions gate, Carbon watch
   agents/planner.py            Argon plan, Hydrogen grounding
+  agents/commerce.py           Global options, store variants and checkout
+  agents/coach.py              Live sessions and visual checks
   media/motion_gen.py          Omni shots and continuity frames
   media/video_gen.py           Illustrated keyframes
   media/voice_gen.py           Gemini TTS, then say / eSpeak
@@ -204,8 +207,6 @@ src/nyc_gemini4_hack/
 frontend/src/                  React workbench (Vite 8)
 ucp-agent-profile.json         Shopify UCP agent profile
 ```
-
-There is no `agents/commerce.py` and no `agents/coach.py` in this tree. Catalog search lives in `shopping.py`. The camera route is the 501 in `server.py`.
 
 ---
 
@@ -230,7 +231,7 @@ There is no `agents/commerce.py` and no `agents/coach.py` in this tree. Catalog 
 | Doc | What it covers |
 | --- | --- |
 | [`PRD.md`](./PRD.md) | Hackathon problem, persona, and the original requirements |
-| [`ARCHITECTURE.md`](./ARCHITECTURE.md) | Model routing, request lifecycle, and schemas. Its diagrams include the planned cart and camera coach. |
+| [`ARCHITECTURE.md`](./ARCHITECTURE.md) | Model routing, request lifecycle, shopping, coaching and schemas. |
 | [`DESIGN_NOTES.md`](./DESIGN_NOTES.md) | Why the workbench is a guide and a player on one page |
 | [`docs/generation.md`](./docs/generation.md) | Shot continuity, parallel folds, and how long a film spends waiting on Omni |
 | [`docs/video-quality.md`](./docs/video-quality.md) | 2026 research, timestamped source footage, and visual checks on rendered actions |

@@ -38,16 +38,19 @@ export function stageProgress(project, connection) {
   const startedClip = !production.length && !legacyStage && status === 'generating'
     && assets.some(asset => asset.status === 'generating');
   return stages.map(([key, baseName]) => {
-    const entries = history.filter(item => item.stage === key);
+    const entries = history.filter(item => item.stage === key || (key === 'motion' && item.stage === 'illustration'));
     let name = baseName;
     if (key === 'motion') {
-      if (assets.some(asset => asset.media_mode === 'illustrated_frames')) name = 'Illustration';
+      if (entries.some(item => item.stage === 'illustration' && item.state === 'started')
+        || assets.some(asset => asset.media_mode === 'illustrated_frames')) name = 'Illustration';
       else if (!assets.some(asset => asset.media_mode === 'motion') && !entries.length) name = 'Footage';
     }
     let state = 'waiting';
     if (key === 'motion' && assets.some(asset => asset.video_model)) state = 'recorded';
     if (key === 'narration' && assets.some(asset => asset.voice_model)) state = 'recorded';
-    const outcomes = entries.map(entry => operationState(entry, status, connection));
+    const outcomes = entries.filter(entry => !(entry.stage === 'motion' && entry.state === 'failed'
+      && entries.some(other => other.stage === 'illustration' && other.step_number === entry.step_number
+        && other.state === 'completed'))).map(entry => operationState(entry, status, connection));
     if (outcomes.includes('started')) state = 'active';
     else if (outcomes.includes('failed')) state = 'failed';
     else if (outcomes.includes('interrupted')) state = 'interrupted';

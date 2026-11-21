@@ -4,6 +4,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { chromium } from 'playwright';
 import { preview } from 'vite';
+import { installYoutubePlayer } from './youtube-player.mjs';
 
 const sample = JSON.parse(await readFile(new URL('../dist/static/example/project.json', import.meta.url), 'utf8'));
 const exampleDir = new URL('../../src/nyc_gemini4_hack/web/example/', import.meta.url);
@@ -47,6 +48,7 @@ async function workbench(t, { width = 1100, state = completed, postStatus = 202,
   t.after(async () => { await page.close(); assert.deepEqual(errors, []); });
   page.on('pageerror', error => errors.push(error.message));
   const submissions = [];
+  await page.route('https://i.ytimg.com/**', route => route.fulfill({ status: 404 }));
   await page.addInitScript(() => {
     window.EventSource = class Stream extends EventTarget {
       static CLOSED = 2;
@@ -388,6 +390,7 @@ test('connects each tutorial to its decision, preserves keyboard selection and r
   const graph = page.getByRole('region', { name: 'Workflow', exact: true });
   const details = graph.getByRole('region', { name: 'Selected node details' });
   const node = id => graph.locator('[data-node="' + id + '"]');
+  await node('motion').getByText('Create video guide', { exact: true }).waitFor();
   const edge = (from, to) => graph.locator('path[data-from="' + from + '"][data-to="' + to + '"]');
   const search = { id: 'source-search', stage: 'research', label: 'Find tutorials', agent: 'YouTube Data API v3',
     state: 'started', detail: state.goal, timestamp: '2026-11-21T14:30:01Z' };
@@ -451,6 +454,7 @@ test('connects each tutorial to its decision, preserves keyboard selection and r
   assert.equal(await edge('review-video_1_relevance', 'planning').count(), 0);
   assert.equal(await edge('review-video_2_relevance', 'planning').getAttribute('data-pending'), 'false');
   await node('source-video_2_relevance').click();
+  await details.getByText('Research details', { exact: true }).click();
   await details.getByText(decisions[1].rationale).waitFor();
   await details.getByText('Cited in plan').waitFor();
   assert.equal(await details.getByRole('link', { name: 'Watch on YouTube' }).getAttribute('href'), plan.source_youtube_urls[1]);
@@ -495,6 +499,71 @@ test('connects each tutorial to its decision, preserves keyboard selection and r
   await capture(page, 'desktop-agent-graph');
 });
 
+test('previews a discovered tutorial and its observed clips before the plan arrives', async t => {
+  const source = { gate_name: 'video_1_relevance', title: 'Fold a paper glider', url: 'https://youtu.be/T5I6Jez-pNI',
+    channel: 'Paper studio', duration_seconds: 83 };
+  const state = { project_id: 'glider', goal: source.title, status: 'researching', media: {} };
+  const { page } = await workbench(t, { state, width: 320 });
+  const requests = [];
+  await page.addInitScript(installYoutubePlayer);
+  await page.route('https://www.youtube-nocookie.com/embed/**', route => {
+    requests.push(route.request().url());
+    return route.fulfill({ contentType: 'text/html', body: '<p>Test tutorial player</p>' });
+  });
+  await page.goto(origin + '/?project=glider');
+  const graph = page.getByRole('region', { name: 'Workflow', exact: true });
+  const details = graph.getByRole('region', { name: 'Selected node details' });
+  const search = { id: 'source-search', label: 'Find tutorials', agent: 'YouTube', stage: 'research',
+    state: 'completed', detail: source.title, sources: [source], timestamp: '2026-11-21T14:30:00Z' };
+  await emit(page, 'activity', search);
+  await graph.locator('[data-node=source-video_1_relevance]').click();
+  await details.getByText('Paper studio · 1:23').waitFor();
+  const preview = details.getByRole('button', { name: 'Preview tutorial', exact: true });
+  await preview.waitFor();
+  assert.equal(requests.length, 0);
+  await preview.focus();
+  await page.keyboard.press('Enter');
+  const frame = details.locator('iframe');
+  await frame.waitFor();
+  assert.equal(new URL(await frame.getAttribute('src')).pathname, '/embed/T5I6Jez-pNI');
+  const analysis = { ...search, sources: [], id: 'analyze-T5I6Jez-pNI', state: 'started', label: 'Analyze tutorial footage' };
+  await emit(page, 'activity', analysis);
+  await graph.locator('.node-type').filter({ hasText: 'Analyzing' }).waitFor();
+  assert.equal(await frame.count(), 1);
+  const fold = { segment_id: 'first', source_url: source.url, source_title: source.title, start_seconds: 4, end_seconds: 12,
+    technique: 'Mark the center', hand_action: 'Hold the corners together.', tools_visible: ['Ruler'], notes: 'Edges meet at the center.' };
+  const wing = { ...fold, segment_id: 'second', start_seconds: 21, end_seconds: 29,
+    technique: 'Fold the wing', hand_action: 'Pinch the new crease.', tools_visible: [], notes: '' };
+  await emit(page, 'activity', { ...analysis, state: 'completed', source_segments: [
+    wing, { ...fold, source_url: 'https://example.org/no-video' }, fold, { ...wing, end_seconds: 0 },
+    { ...wing, source_url: 'https://youtu.be/ccDD11_aaBB', start_seconds: 1, end_seconds: 7 },
+  ] });
+  await details.getByText(fold.hand_action).waitFor();
+  await details.getByText('Visible tools · Ruler').waitFor();
+  await details.getByText(fold.notes).waitFor();
+  assert.equal(await graph.locator('.graph-disclosure > summary small').innerText(), '1 source · 2 clips');
+  await details.getByText('1 more clip').click();
+  const clipButton = details.getByRole('button', { name: 'Preview Fold the wing, 0:21–0:29' });
+  await clipButton.click();
+  const embed = new URL(await frame.getAttribute('src'));
+  assert.equal(embed.pathname, '/embed/T5I6Jez-pNI');
+  assert.deepEqual([embed.searchParams.get('start'), embed.searchParams.get('end')], ['21', '29']);
+  const fallback = details.getByRole('link', { name: 'open the clip on YouTube' });
+  assert.equal(await fallback.getAttribute('href'), plan.source_youtube_urls[1] + '&t=21s');
+  await emit(page, 'status', { status: 'planning', message: 'Preparing guide.' });
+  await emit(page, 'plan_ready', { ...plan, steps: [{ ...steps[0], source_segments: [{ ...fold, segment_id: 'S1.1' }] }] });
+  assert.equal(await graph.locator('.graph-disclosure > summary small').innerText(), '1 source · 2 clips');
+  assert.equal(await frame.getAttribute('src'), embed.href);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await capture(page, 'phone-workflow-clip');
+  await details.getByText('1 more clip').click();
+  await frame.waitFor({ state: 'detached' });
+  await preview.click();
+  await graph.locator('.graph-disclosure > summary').click();
+  await page.locator('.workflow-preview iframe').waitFor({ state: 'detached' });
+  assert.equal(await page.locator('iframe').count(), 0);
+});
+
 test('opens the completed example graph from its film and resolves only evidenced legacy source links', async t => {
   const { page } = await workbench(t, { width: 1280 });
   const url = 'https://www.youtube.com/watch?v=T5I6Jez-pNI';
@@ -505,7 +574,8 @@ test('opens the completed example graph from its film and resolves only evidence
     { gate_name: 'video_3_relevance', choice: 'SKIP_FILLER', rationale: 'No folding steps.' },
   ];
   await page.route('**/static/example/project.json', route => route.fulfill({ json: {
-    ...sample, plan: { ...sample.plan, source_youtube_urls: [url] }, decisions_log: decisions, activity: [],
+    ...sample, plan: { ...sample.plan, source_youtube_urls: [url],
+      steps: sample.plan.steps.map(step => ({ ...step, source_segments: [] })) }, decisions_log: decisions, activity: [],
   } }));
   await page.goto(origin);
   await page.waitForFunction(() => document.querySelector('#video')?.readyState >= 1);
@@ -657,4 +727,32 @@ test('plays a saved chapter when the older full film has no seek position for it
   await page.waitForFunction(() => document.querySelector('#chapter-video')?.currentTime > .05);
   await page.getByRole('button', { name: 'Return to full film' }).click();
   await page.waitForFunction(() => document.querySelector('#video')?.readyState >= 2);
+});
+
+test('opens the dedicated Live Build Coach screen from the guide and returns cleanly', async t => {
+  const { page } = await workbench(t);
+  await page.goto(origin + '/?project=glider');
+  await page.getByRole('heading', { name: plan.project_title }).waitFor();
+  await page.getByRole('button', { name: "Let's build now" }).click();
+  await page.getByRole('heading', { name: plan.project_title }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Start live coach' }).isEnabled(), true);
+  assert.equal(await page.getByText(steps[0].title).first().isVisible(), true);
+  await page.getByRole('button', { name: 'Next step' }).click();
+  assert.equal(await page.getByRole('heading', { name: steps[1].title }).isVisible(), true);
+  await page.getByRole('button', { name: '← Back to guide' }).click();
+  await page.getByRole('heading', { name: steps[1].title }).waitFor();
+});
+
+test('opens the coach on a narrow phone and honors its separate service capability', async t => {
+  const { page } = await workbench(t, {
+    width: 320, health: { capabilities: { live_coach: false, material_catalog: true } },
+  });
+  await page.goto(origin + '/?project=glider');
+  await page.getByText('Services ready').waitFor();
+  await page.getByRole('button', { name: "Let's build now" }).click();
+  assert.equal(await page.getByRole('button', { name: 'Start live coach' }).isDisabled(), true);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.getByRole('button', { name: '← Back to guide' }).click();
+  await page.getByRole('button', { name: 'New guide' }).click();
+  assert.equal(await page.getByRole('button', { name: 'Generate guide' }).isEnabled(), true);
 });

@@ -16,8 +16,8 @@ from google.genai import types
 
 from nyc_gemini4_hack.gemini_client import Gemini4Client
 from nyc_gemini4_hack.media.composer import CHAPTER_FPS, _render, _wav_duration_seconds, run_media_work
-from nyc_gemini4_hack.media.shot_review import corrective_target, discrepancies, inspect_shot, source_observations
-from nyc_gemini4_hack.media.video_gen import _image_format
+from nyc_gemini4_hack.media.shot_review import corrective_target, discrepancies, inspect_shot
+from nyc_gemini4_hack.media.video_gen import _image_format, source_observations
 from nyc_gemini4_hack.models import BuildStep, ShotReview, VisualContinuityBible
 
 FPS = CHAPTER_FPS
@@ -41,9 +41,14 @@ class MotionShot:
 
 
 class ShotRejected(RuntimeError):
-    def __init__(self, reviews: list[ShotReview]):
+    def __init__(self, reviews: list[ShotReview], reviewed_prefix: tuple[bytes, ...] = ()):
         super().__init__("The footage did not pass visual review.")
         self.reviews = list(reviews)
+        self.reviewed_prefix = reviewed_prefix
+
+
+class MotionOutputError(RuntimeError):
+    """A description of a missing or unusable video that is safe to display in a guide."""
 
 
 def _shot_prompt(step: BuildStep, bible: VisualContinuityBible, has_reference: bool) -> str:
@@ -88,7 +93,7 @@ async def _download_video(gemini: Gemini4Client, uri: str, output: Path) -> None
             await files.download(file=uri, destination=output)
             return
         if info.state != types.FileState.PROCESSING:
-            raise RuntimeError(f"The video provider could not prepare the file ({info.state}).")
+            raise MotionOutputError(f"The video provider could not prepare the file ({info.state}).")
         await asyncio.sleep(3)
 
 
@@ -120,6 +125,7 @@ async def generate_motion_shot(
     output = out_dir / f"step_{step.step_number:02d}_motion.mp4"
     end_frame = out_dir / f"step_{step.step_number:02d}_pov_end.jpg"
     reviews: list[ShotReview] = []
+    reviewed_prefix: tuple[bytes, ...] = ()
     opening = prev_step_end_frame
     target = target_origin = None
     target_preparation_seconds = None
@@ -148,6 +154,15 @@ async def generate_motion_shot(
                         samples[-1][1].replace(end_frame)
                         video.replace(output)
                         return MotionShot(output, count, end_frame, tuple(reviews))
+                    # Save only individually confirmed setup/contact stills from ONE take for
+                    # illustration recovery. The rejected movie and its endpoint stay in staging.
+                    if review.opening and review.opening.verdict == "matches":
+                        prefix = [samples[0][1]]
+                        contact = review.contact
+                        if contact and contact.verdict == "matches" and 1 < contact.sample < len(samples):
+                            prefix.append(samples[contact.sample - 1][1])
+                        if len(prefix) >= len(reviewed_prefix):
+                            reviewed_prefix = tuple(path.read_bytes() for path in prefix)
                     if attempt == 2:
                         break
                     # A rejected shot stays in staging. Reuse only a boundary individually confirmed by the reviewer.
@@ -164,9 +179,9 @@ async def generate_motion_shot(
                               + "\nCorrect the following observed discrepancy in a fresh take:\n" + problem)
     except Exception as exc:
         if reviews and reviews[0].status == "rejected":
-            raise ShotRejected(reviews) from exc
+            raise ShotRejected(reviews, reviewed_prefix) from exc
         raise
-    raise ShotRejected(reviews)
+    raise ShotRejected(reviews, reviewed_prefix)
 
 
 async def _render_candidate(gemini: Gemini4Client, prompt: str, duration: int,
@@ -191,13 +206,13 @@ async def _render_candidate(gemini: Gemini4Client, prompt: str, duration: int,
     )
     media = result.output_video
     if result.status != "completed" or media is None:
-        raise RuntimeError(f"Video model {model} returned no completed motion shot ({result.status}).")
+        raise MotionOutputError(f"The video provider returned no completed shot ({result.status}).")
     if media.uri:
         await _download_video(gemini, media.uri, video)
     elif media.data:
         video.write_bytes(base64.b64decode(media.data, validate=True))
     else:
-        raise RuntimeError(f"Video model {model} returned an empty motion shot.")
+        raise MotionOutputError("The video provider returned an empty motion shot.")
 
 
 def _sample_motion(video: Path, directory: Path) -> tuple[int, list[tuple[float, Path]]]:
@@ -224,7 +239,7 @@ def _motion_frames(video: Path) -> int:
     ], capture_output=True, text=True, errors="replace")
     frames = [int(line.removeprefix("frame=")) for line in result.stdout.splitlines() if line.startswith("frame=")]
     if result.returncode or not frames or frames[-1] < 2:
-        raise RuntimeError(f"The generated demonstration has no usable motion footage. {result.stderr[-400:].strip()}")
+        raise MotionOutputError("The generated video had no usable motion frames.")
     return frames[-1]
 
 

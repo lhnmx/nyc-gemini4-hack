@@ -1,6 +1,9 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import AgentGraph from './AgentGraph.jsx';
+import LoopingSourceClip from './LoopingSourceClip.jsx';
+import ResearchPreview from './ResearchPreview.jsx';
 import { stageProgress } from './activity.js';
+import { graphSources } from './graphData.js';
 import { legacyMediaStage, mediaActivity, timeLabel } from './project.js';
 
 const stageNames = {
@@ -14,7 +17,7 @@ const stageNames = {
   failed: 'Generation stopped',
 };
 
-function FilmPlaceholder({ project, filmError, connection }) {
+function FilmPlaceholder({ project, filmError, connection, inWorkflow }) {
   const status = project?.status;
   const terminal = ['completed', 'partial', 'failed'].includes(status);
   const history = project?.activity || [];
@@ -34,7 +37,9 @@ function FilmPlaceholder({ project, filmError, connection }) {
   const stitching = assembling.some(entry => entry.step_number == null) || legacyStage?.stage === 'stitching';
   const assemblingStep = assembling.length === 1 ? assembling[0].step_number : legacyStage?.step_number;
   const visualName = progress.find(item => item.key === 'motion').name;
-  const visual = { Illustration: 'illustrations', Motion: 'motion', Footage: 'chapter footage' }[visualName];
+  const visualWork = new Set(ongoing.map(entry => entry.stage));
+  const visual = visualWork.has('motion') ? (visualWork.has('illustration') ? 'chapter footage' : 'motion')
+    : { Illustration: 'illustrations', Motion: 'motion', Footage: 'chapter footage' }[visualName];
   const producing = stitching ? 'Assembling the full film'
     : active.includes('motion') && active.includes('narration') ? 'Creating ' + visual + ' and narration'
     : active.includes('motion') ? 'Creating ' + visual
@@ -49,7 +54,9 @@ function FilmPlaceholder({ project, filmError, connection }) {
   const chapterNames = activeSteps.slice(0, 2).map(step => 'Step ' + step.step_number + ' · ' + step.title);
   if (activeSteps.length > 2) chapterNames.push('+' + (activeSteps.length - 2) + ' more');
   const mediaDetail = chapterNames.join(' / ') || (stitching ? 'Joining the chapters and their captions.' : 'Preparing the next video stage.');
-  const operation = current?.detail || current?.label;
+  const reviewingSources = current?.id.startsWith('source-selection') && current.sources?.length;
+  const operation = reviewingSources ? 'Reviewing ' + reviewingSources + (reviewingSources === 1 ? ' YouTube tutorial.' : ' YouTube tutorials.')
+    : current?.detail || current?.label;
   const detail = filmError ? 'You can follow the written steps.' : disconnected ? 'Last report · ' + stageTitle : {
     submitting: '', queued: '',
     researching: operation || project?.status_message,
@@ -59,8 +66,8 @@ function FilmPlaceholder({ project, filmError, connection }) {
     partial: project?.status_message || 'Follow the available written steps.',
     failed: project?.status_message || 'Open a new guide to try again.',
   }[status];
-  return <div className="film-placeholder">
-    <div className="film-foot"><span className="film-bug"><i className="viewfinder" aria-hidden="true" /> Guide film</span>
+  return <div className={inWorkflow ? 'workflow-progress' : 'film-placeholder'}>
+    <div className="film-foot">{!inWorkflow && <span className="film-bug"><i className="viewfinder" aria-hidden="true" /> Guide film</span>}
       {total > 0 && !filmError && <span>{count} of {total} chapters ready</span>}
       {Number.isFinite(mediaProgress?.elapsed_seconds) && !terminal && <span>Media time {timeLabel(mediaProgress.elapsed_seconds)}</span>}
     </div>
@@ -71,9 +78,10 @@ function FilmPlaceholder({ project, filmError, connection }) {
   </div>;
 }
 
-export function Film({ project, film, filmError, captions, poster, videoRef, starts, index, setIndex, onFilmError, connection, example, preview, onClosePreview, continuingPreview }) {
+export function Film({ project, film, filmError, captions, poster, videoRef, starts, index, setIndex, onFilmError, connection,
+  example, preview, sourcePreview, chapterHelp, audioRef, onPreviewError, onClosePreview, continuingPreview }) {
   const previewPlayback = useRef(null);
-  const [failedPreview, setFailedPreview] = useState(null);
+  const [playing, setPlaying] = useState(null);
   const timelineComplete = starts.every((start, i) => start != null && (i === 0 || start > starts[i - 1]));
   function syncStep(event) {
     const video = event.currentTarget;
@@ -88,13 +96,34 @@ export function Film({ project, film, filmError, captions, poster, videoRef, sta
     };
   }
   const fullFilmReady = Boolean(film && !filmError);
-  const playable = fullFilmReady && !preview;
+  const playable = fullFilmReady && !preview && !sourcePreview;
+  const sources = project ? graphSources(project, connection) : [];
+  const linked = sources.filter(source => source.url);
+  const liveResearch = !project?.plan && ['researching', 'planning'].includes(project?.status);
+  const stopPreview = owner => setPlaying(previous => previous?.owner === owner ? null : previous);
+  function togglePreview(owner, url, interval) {
+    if (playing?.owner === owner && playing.url === url && playing.interval === interval) {
+      stopPreview(owner);
+      return;
+    }
+    videoRef.current?.pause();
+    audioRef.current?.pause();
+    if (sourcePreview) onClosePreview(false);
+    setPlaying({ owner, url, interval });
+  }
+  useEffect(() => { if (sourcePreview) setPlaying(null); }, [sourcePreview]);
+  useEffect(() => {
+    setPlaying(previous => previous?.owner === 'research' ? null : previous);
+  }, [liveResearch]);
+  const research = <ResearchPreview sources={linked} recorded={!liveResearch} project={project} connection={connection}
+    playing={playing} togglePreview={togglePreview} stopPreview={stopPreview} />;
   const steps = project?.plan?.steps || [];
   const durations = steps.map(step => project.media?.[step.step_number]?.duration_seconds);
   const duration = durations.length && durations.every(t => Number.isFinite(t) && t > 0)
     ? durations.reduce((sum, t) => sum + t, 0) : null;
-  return <section className="film-section" aria-label="Guide film">
-    <div className="player" id={playable || preview ? undefined : 'generation-panel'} data-state={filmError ? 'failed' : project?.status}>
+  return <><section className="film-section" aria-label="Guide film">
+    <div className="player" id={playable || preview || sourcePreview ? undefined : 'generation-panel'} data-state={filmError ? 'failed' : project?.status}
+      onPlayCapture={() => setPlaying(null)}>
       {playable ? <video key="full-film" id="video" ref={videoRef} controls playsInline preload="metadata" crossOrigin="anonymous"
         src={film} poster={poster} aria-label={(project?.plan?.project_title || project?.goal || 'Your guide') + ' · Full guide video'}
         onLoadedMetadata={event => {
@@ -113,23 +142,30 @@ export function Film({ project, film, filmError, captions, poster, videoRef, sta
       </video> : preview ? <video key={preview.clip} id="chapter-video" ref={videoRef} controls autoPlay playsInline
         crossOrigin="anonymous" src={preview.clip} poster={preview.poster} aria-label={preview.step.title + ' · Chapter video'}
         onTimeUpdate={rememberPreview} onSeeked={rememberPreview} onPlay={rememberPreview} onPause={rememberPreview} onEnded={rememberPreview}
-        onLoadedMetadata={() => setFailedPreview(null)}
-        onError={() => { setFailedPreview(preview.step.step_number); onClosePreview(); }}>
+        onError={event => onPreviewError(event.currentTarget.getAttribute('src'))}>
         {preview.captions && <track kind="captions" label="English" srcLang="en" src={preview.captions} />}
-      </video> : <FilmPlaceholder project={project} filmError={filmError} connection={connection} />}
+      </video> : sourcePreview ? <LoopingSourceClip iframeId="chapter-source-video" key={sourcePreview.embed}
+        url={sourcePreview.segment.source_url} segment={sourcePreview.segment} loop={false}
+        title={steps[index].title + ' · Source clip ' + timeLabel(sourcePreview.segment.start_seconds) + '–' + timeLabel(sourcePreview.segment.end_seconds)}
+      />
+        : chapterHelp || <FilmPlaceholder project={project} filmError={filmError} connection={connection} />}
       {playable && <div className="film-caption" role="status"><span><i className="viewfinder" aria-hidden="true" />
         {example ? 'Example film' : 'Guide film ready'}</span>
         <span>{[duration && timeLabel(duration), captions && 'CC'].filter(Boolean).join(' · ')}</span>
       </div>}
-      {preview && <div className="film-caption"><span role="status">Chapter {index + 1} preview</span>
+      {(preview || sourcePreview) && <div className="film-caption">
+        {sourcePreview ? <a href={sourcePreview.href} rel="noopener noreferrer" target="_blank">
+          Source clip · {timeLabel(sourcePreview.segment.start_seconds)}–{timeLabel(sourcePreview.segment.end_seconds)} on YouTube ↗</a>
+          : <span role="status">Chapter {index + 1} {preview.media?.media_mode === 'illustrated_frames' ? '· Illustrated preview' : 'preview'}</span>}
         <button type="button" className="return-progress" onClick={onClosePreview}>
-          {fullFilmReady ? 'Return to full film' : 'Return to progress'}
+          {fullFilmReady ? 'Return to full film' : sourcePreview ? 'Back to guide' : 'Return to progress'}
         </button>
       </div>}
-      {project && <AgentGraph project={project} connection={connection} playback={Boolean(playable || preview)} />}
+      {project && <AgentGraph project={project} connection={connection} playback={Boolean(playable || preview || sourcePreview)}
+        sources={sources} playing={playing} togglePreview={togglePreview} stopPreview={stopPreview}
+        progress={chapterHelp && <FilmPlaceholder inWorkflow project={project} filmError={filmError} connection={connection} />}
+        replayPreview={!liveResearch && linked.length > 0 ? research : null} />}
     </div>
-    {!preview && !playable && failedPreview && failedPreview === steps[index]?.step_number &&
-      <p className="stream-connection" role="status">This chapter could not play. You can still follow its written steps.</p>}
     {connection && <p className="stream-connection" role="status">{connection.message}</p>}
-  </section>;
+  </section>{liveResearch && research}</>;
 }

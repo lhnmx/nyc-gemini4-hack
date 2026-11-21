@@ -4,8 +4,10 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from time import monotonic
 
+from nyc_gemini4_hack.agents.commerce import build_shopping_cart_proposal
 from nyc_gemini4_hack.agents.planner import synthesize_build_plan
 from nyc_gemini4_hack.agents.researcher import research_goal_on_youtube
 from nyc_gemini4_hack.config import get_settings
@@ -14,16 +16,54 @@ from nyc_gemini4_hack.media.composer import (
     NarratedChapter, caption_chapter, compose_step_pov_video, stitch_full_tutorial,
     _wav_duration_seconds, run_media_work, write_tutorial_captions,
 )
-from nyc_gemini4_hack.media.motion_gen import MotionShot, ShotRejected, compose_motion_with_voice, generate_motion_shot
+from nyc_gemini4_hack.media.motion_gen import (
+    MotionOutputError, MotionShot, ShotRejected, compose_motion_with_voice, generate_motion_shot,
+)
+from nyc_gemini4_hack.media.shot_review import inspect_illustrations
 from nyc_gemini4_hack.media.video_gen import generate_step_pov_frames
 from nyc_gemini4_hack.media.voice_gen import generate_step_voiceover
 from nyc_gemini4_hack.models import (
-    AgentActivity, BuildStep, DecisionResult, MediaProgress, ProjectState, ProjectStatus, StepMediaAsset,
+    AgentActivity, BuildStep, DecisionResult, MediaProgress, ProjectState, ProjectStatus, StepMediaAsset, VisualReview,
 )
 
 logger = logging.getLogger(__name__)
 
 EventPublisher = Callable[[str, str, dict[str, object]], Awaitable[None]]
+ILLUSTRATION_TIMEOUT = 180
+
+
+def _review_reason(review: VisualReview) -> str:
+    for finding in (review.result, review.contact, review.opening):
+        if finding and finding.verdict == "contradicts":
+            return " ".join(finding.observation.split())
+    return {
+        "rejected": "The images contradicted the required technique.",
+        "uncertain": "The visual review was inconclusive.",
+        "unavailable": " ".join(filter(None, ("The visual review was unavailable.", review.unavailable_reason))),
+    }.get(review.status, "")
+
+
+def _generation_failure(label: str, error: Exception) -> str:
+    if isinstance(error, TimeoutError):
+        return f"{label} timed out."
+    if isinstance(error, MotionOutputError):
+        return str(error)
+    code = getattr(error, "code", None) or getattr(error, "status_code", None)
+    if isinstance(code, int) and 400 <= code <= 599:
+        return f"{label} failed (provider returned HTTP {code})."
+    return f"{label} could not be generated."
+
+
+def _motion_failure(error: Exception) -> str:
+    if not isinstance(error, ShotRejected):
+        return _generation_failure("Motion footage", error)
+    rejected = next((review for review in reversed(error.reviews) if review.status == "rejected"), None)
+    detail = _review_reason(rejected) if rejected else ""
+    if error.reviews and error.reviews[-1].status in {"unavailable", "uncertain"}:
+        detail += " " + _review_reason(error.reviews[-1])
+    elif isinstance(error.__cause__, Exception):
+        detail += " " + _generation_failure("The corrective take", error.__cause__)
+    return f"Motion footage was withheld after visual review. {detail}".strip()
 
 
 async def generate_media_for_plan(
@@ -32,6 +72,8 @@ async def generate_media_for_plan(
     publish_event: EventPublisher | None = None,
     max_steps: int | None = None,
     prefer_gemini_audio: bool = True,
+    *,
+    before_completion: Awaitable[None] | None = None,
 ) -> Path | None:
     """Render each physical sequence from its parent frames and assemble the film in guide order."""
     if project.plan is None:
@@ -63,7 +105,10 @@ async def generate_media_for_plan(
         if (
             asset and asset.status == "ready" and path.is_file()
             and asset.video_url == media_base + path.name
-            and (asset.media_mode or "illustrated_frames") == mode
+            and ((asset.media_mode or "illustrated_frames") == mode or (
+                mode == "motion" and asset.media_mode == "illustrated_frames" and asset.motion_failure
+                and asset.illustration_review and asset.illustration_review.status == "passed"
+            ))
         ):
             reusable.append((step, asset, path))
         else:
@@ -100,6 +145,7 @@ async def generate_media_for_plan(
     visual_model = gemini.settings.pov_video_model if mode == "motion" else gemini.settings.pov_image_model
     media_stages = {
         "motion": ("Chapter footage" if mode == "motion" else "Chapter illustrations", "Gemini"),
+        "illustration": ("Chapter illustrations", "Gemini"),
         "narration": ("Chapter narration", "Speech generator"),
         "assembly": ("Chapter encoding and captions", "FFmpeg"),
     }
@@ -135,6 +181,9 @@ async def generate_media_for_plan(
             if isinstance(wav, Exception):
                 await activity("narration", "failed", step)
                 return wav
+            asset = project.media[step.step_number]
+            asset.audio_url = media_base + wav.name
+            asset.voice_model = model_used
             await activity("narration", "completed", step, model_used)
             return wav, model_used
 
@@ -149,8 +198,12 @@ async def generate_media_for_plan(
 
     async def film(
         index: int, step: BuildStep, parent: asyncio.Task | None, recording: asyncio.Task,
+        after: asyncio.Task | None,
     ) -> MotionShot | list[Path] | Exception:
-        # Wait outside the semaphore so a dependent fold cannot occupy an independent shot's slot.
+        # In serial mode finish each visual job in guide order, including review and recovery.
+        # The continuity frame still comes only from the step's declared physical parent.
+        if after is not None:
+            await after
         source = await parent if parent is not None else None
         reference = source.continuity_frame if isinstance(source, MotionShot) else None
         if isinstance(source, list) and source:
@@ -162,13 +215,66 @@ async def generate_media_for_plan(
             await progress("footage", f"Rendering step {index + 1} of {len(steps)} · {step.title}", step)
             await emit("step_media_started", asset.model_dump())
             await activity("motion", "started", step, visual_model)
-            return await footage
+            shot = await footage
+            if mode == "motion" and isinstance(shot, Exception):
+                asset.video_model = visual_model
+                prefix: tuple[bytes, ...] = ()
+                correction = ""
+                if isinstance(shot, ShotRejected):
+                    asset.shot_reviews = shot.reviews
+                    prefix = shot.reviewed_prefix
+                    last_rejection = next((r for r in reversed(shot.reviews) if r.status == "rejected"), None)
+                    if last_rejection:
+                        correction = "\n".join(
+                            finding.observation for finding in
+                            (last_rejection.opening, last_rejection.contact, last_rejection.result)
+                            if finding and finding.verdict == "contradicts"
+                        )
+                    first = shot.reviews[0] if shot.reviews else None
+                    if (first and first.reference_mode == "first_frame" and first.opening
+                            and first.opening.verdict == "contradicts"):
+                        reference = None
+                asset.motion_failure = _motion_failure(shot)
+                await activity("motion", "failed", step, visual_model, asset.motion_failure)
+                return await recover_illustrations(step, asset, reference, prefix, correction)
+            return shot
+
+    async def recover_illustrations(
+        step: BuildStep, asset: StepMediaAsset, reference: Path | None,
+        prefix: tuple[bytes, ...], correction: str,
+    ) -> list[Path] | Exception:
+        model = gemini.settings.pov_image_model
+        await activity("illustration", "started", step, model, "Preparing setup, action and result illustrations.")
+        try:
+            # Review has a separate deadline so a slow image render cannot consume its budget.
+            with TemporaryDirectory(dir=project_dir) as staging:
+                async with asyncio.timeout(ILLUSTRATION_TIMEOUT):
+                    frames = await generate_step_pov_frames(
+                        step=step, bible=project.plan.continuity_bible, out_dir=Path(staging),
+                        gemini=gemini, prev_step_end_frame=reference, reviewed_prefix=prefix, correction=correction,
+                    )
+                review = await inspect_illustrations(gemini, step, frames)
+                asset.illustration_review = review
+                if review.status == "passed":
+                    accepted = [frame.replace(project_dir / frame.name) for frame in frames]
+        except Exception as exc:
+            logger.warning("Step %s illustration recovery failed (%s)", step.step_number, type(exc).__name__)
+            reason = _generation_failure("Chapter illustrations", exc)
+        else:
+            if review.status == "passed":
+                asset.media_mode, asset.video_model = "illustrated_frames", model
+                await activity("illustration", "completed", step, model,
+                               "Visual review confirmed the illustrated setup, action and result.")
+                return accepted
+            reason = f"Illustrations were withheld. {_review_reason(review)}"
+        await activity("illustration", "failed", step, model, reason)
+        asset.error = f"{asset.motion_failure} {reason}"
+        return RuntimeError(reason)
 
     async def fail_step(asset: StepMediaAsset, stage: str, error: Exception) -> None:
         logger.error("Failed to generate %s for step %s", stage, asset.step_number, exc_info=error)
         asset.status = "error"
-        asset.error = (f"Step {asset.step_number} footage was withheld after visual review."
-                       if isinstance(error, ShotRejected) else f"Step {asset.step_number} {stage} could not be generated.")
+        asset.error = asset.error or _generation_failure(f"Step {asset.step_number} {stage}", error)
         await emit("step_media_error", asset.model_dump())
 
     async def finish(index: int, step: BuildStep, footage: asyncio.Task, recording: asyncio.Task) -> None:
@@ -176,24 +282,24 @@ async def generate_media_for_plan(
         asset = project.media[number]
         shot = await footage
         if isinstance(shot, Exception):
-            if isinstance(shot, ShotRejected):
-                asset.video_model = visual_model
-                asset.shot_reviews = shot.reviews
-            await activity("motion", "failed", step, visual_model,
-                           "Footage withheld after visual review." if isinstance(shot, ShotRejected) else "")
+            if not asset.motion_failure:
+                await activity("motion", "failed", step, visual_model, _generation_failure("Chapter illustrations", shot))
+            await recording  # The error event also carries any independently completed narration.
             await fail_step(asset, "motion footage" if mode == "motion" else "illustrations", shot)
             return
-        asset.video_model = visual_model
-        detail = ""
         if isinstance(shot, MotionShot):
             asset.shot_reviews = list(shot.reviews)
             last = shot.reviews[-1]
             detail = {
                 "passed": f"Visual review passed on take {last.attempt} across {len(last.sampled_seconds)} frames.",
                 "uncertain": "The visual review was inconclusive.",
-                "unavailable": "Visual review was unavailable.",
+                "unavailable": _review_reason(last),
             }[last.status]
-        await activity("motion", "completed", step, visual_model, detail)
+        else:
+            detail = ""
+        if not asset.motion_failure:
+            asset.video_model = visual_model
+            await activity("motion", "completed", step, visual_model, detail)
         audio = await recording
         if isinstance(audio, Exception):
             await fail_step(asset, "narration", audio)
@@ -212,7 +318,7 @@ async def generate_media_for_plan(
                     await compose_step_pov_video(
                         frames=shot, voice_wav=wav, out_mp4=step_mp4, min_duration=step.duration_seconds,
                     )
-                    poster = shot[0]
+                    poster = shot[1] if asset.illustration_review else shot[0]
                 stage = "captions"
                 chapter = await run_media_work(caption_chapter, step_mp4, wav, step.narration_script)
             except Exception as exc:
@@ -241,7 +347,8 @@ async def generate_media_for_plan(
         for index, step in enumerate(steps):
             parent = previous if step.visual_parent == -1 else footage_by_step[step.visual_parent]
             recording = group.create_task(voice(step))
-            footage = group.create_task(film(index, step, parent, recording))
+            after = previous if settings.max_parallel_shots == 1 else None
+            footage = group.create_task(film(index, step, parent, recording, after))
             finishes.append(group.create_task(finish(index, step, footage, recording)))
             footage_by_step[step.step_number] = footage
             previous = footage
@@ -262,7 +369,7 @@ async def generate_media_for_plan(
                 )
                 if recorded_voice is None and asset.audio_url == media_base + wav.name:
                     asset.audio_url = None
-                asset.media_mode = mode
+                asset.media_mode = asset.media_mode or "illustrated_frames"
                 asset.duration_seconds = chapter.duration_seconds
                 asset.captions_url = media_base + video.with_suffix(".vtt").name
                 chapters[step.step_number] = chapter
@@ -290,6 +397,10 @@ async def generate_media_for_plan(
                 "media": {str(number): asset.model_dump() for number, asset in project.media.items()},
             })
 
+    project.media_progress.elapsed_seconds = round(monotonic() - started, 3)
+    # A terminal status ends the client's event stream and releases the worker lease.
+    if before_completion is not None:
+        await before_completion
     if ready < requested:
         project.status = ProjectStatus.PARTIAL if ready or reusable else ProjectStatus.FAILED
         project.error = f"{ready} of {requested} requested clips are ready. The written guide is available."
@@ -307,7 +418,6 @@ async def generate_media_for_plan(
         )
     else:
         project.status_message = f"Your narrated film is ready with {ready} chapters."
-    project.media_progress.elapsed_seconds = round(monotonic() - started, 3)
     await emit("status", {
         "status": project.status.value, "message": project.status_message,
         "media_progress": project.media_progress.model_dump(),
@@ -400,15 +510,26 @@ async def run_project_pipeline(
 
         await emit("plan_ready", plan.model_dump())
 
-        # 3. POV Video + Voice Generation
-        if generate_media:
-            await generate_media_for_plan(
-                project=project,
-                gemini=gemini,
-                publish_event=publish_event,
-                max_steps=max_media_steps,
-            )
-        else:
+        async def prepare_cart() -> None:
+            try:
+                cart = await build_shopping_cart_proposal(materials=plan.materials)
+            except Exception as exc:
+                logger.warning("Shopify MCP commerce step failed: %s", exc)
+                return
+            project.cart = cart
+            await emit("cart_ready", cart.model_dump(mode="json"))
+
+        async with asyncio.TaskGroup() as tasks:
+            commerce = tasks.create_task(prepare_cart()) if plan.materials else None
+            if generate_media:
+                await generate_media_for_plan(
+                    project=project,
+                    gemini=gemini,
+                    publish_event=publish_event,
+                    max_steps=max_media_steps,
+                    before_completion=commerce,
+                )
+        if not generate_media:
             project.status = ProjectStatus.COMPLETED
             project.status_message = f"Your written guide is ready with {len(plan.steps)} steps."
             await emit("status", {"status": project.status.value, "message": project.status_message})

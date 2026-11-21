@@ -5,7 +5,7 @@ export const apiUrl = path => apiBase + path;
 export const isFinished = status => ['completed', 'partial', 'failed'].includes(status);
 
 export function mediaActivity(project) {
-  return (project?.activity || []).filter(entry => ['motion', 'narration', 'assembly'].includes(entry.stage));
+  return (project?.activity || []).filter(entry => ['motion', 'illustration', 'narration', 'assembly'].includes(entry.stage));
 }
 
 export function legacyMediaStage(project, activity) {
@@ -18,8 +18,10 @@ export function legacyMediaStage(project, activity) {
 export function chapterRenderState(number, asset, activity, legacyStage) {
   // A chapter can have narration while its footage is still queued behind a physical dependency.
   const video = activity.filter(entry => entry.step_number === number && entry.stage !== 'narration');
-  if (video.some(entry => entry.state === 'failed')) return 'error';
-  if (video.some(entry => entry.state === 'started')) return 'rendering';
+  const recovering = video.some(entry => entry.stage === 'illustration');
+  const current = recovering ? video.filter(entry => entry.stage !== 'motion') : video;
+  if (current.some(entry => entry.state === 'failed')) return 'error';
+  if (current.some(entry => entry.state === 'started')) return 'rendering';
   if (video.length) return 'waiting';
   if (asset?.status === 'generating' || legacyStage?.step_number === number) return 'rendering';
   return 'queued';
@@ -85,12 +87,16 @@ export function useHealth(refresh) {
           ? 'Guide generation needs the ' + missing.join(' and ') + ' API ' + (missing.length === 1 ? 'key' : 'keys') + ' configured on the server.'
           : 'The server has API keys for Gemini and YouTube.';
         const detail = data.generation_message || (blocked && !missing.length ? 'Guide generation is unavailable on this server.' : keyStatus);
-        setHealth({ label: blocked ? 'Setup needed' : 'Services ready', detail, blocked, catalogEnabled: data.capabilities?.material_catalog === true });
+        setHealth({
+          label: blocked ? 'Setup needed' : 'Services ready', detail, blocked,
+          catalogEnabled: data.capabilities?.material_catalog === true,
+          liveCoachReady: Boolean(data.capabilities?.live_coach ?? data.gemini_configured),
+        });
         if (blocked && refresh) retry = setTimeout(check, 5000);
       } catch {
         if (closed) return;
         setHealth(current => ({ label: 'Reconnecting', detail: 'Checking the connection again shortly.',
-          reconnecting: true, catalogEnabled: current.catalogEnabled }));
+          reconnecting: true, catalogEnabled: current.catalogEnabled, liveCoachReady: current.liveCoachReady }));
         retry = setTimeout(check, 5000);
       } finally {
         clearTimeout(deadline);
@@ -137,6 +143,7 @@ export function useProject(route) {
       listen('project_error', applyStatus);
       listen('error', applyStatus);
       listen('plan_ready', plan => setProject(state => ({ ...state, plan })));
+      listen('cart_ready', cart => setProject(state => ({ ...state, cart })));
       listen('activity', event => setProject(state => {
         const history = state.activity || [];
         const present = history.some(entry => entry.id === event.id);

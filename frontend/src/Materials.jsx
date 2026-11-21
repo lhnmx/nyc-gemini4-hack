@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { apiUrl } from './project.js';
 import './materials.css';
 
@@ -11,6 +11,14 @@ function priceLabel(price) {
 }
 
 const materialQuery = item => (item.search_query?.trim() || item.name.trim()).slice(0, 300);
+
+function checkoutLink(value) {
+  if (typeof value !== 'string' || !value.startsWith('https://') || /[\s\\\x00-\x1F]/.test(value)) return null;
+  try {
+    const url = new URL(value);
+    return url.hostname && !url.username && !url.password ? url : null;
+  } catch { return null; }
+}
 
 function useCatalog(queries) {
   const [results, setResults] = useState(() => new Map());
@@ -157,7 +165,7 @@ function SupplyRow({ item, gathered, expanded, result, searching, onToggle, onCh
   </li>;
 }
 
-export default function Materials({ materials, checked, setChecked, catalogEnabled }) {
+export default function Materials({ ref, materials, cart, checked, setChecked, catalogEnabled }) {
   const focusId = useRef(null);
   const section = useRef(null);
   const [requested, setRequested] = useState(() => new Set());
@@ -182,10 +190,22 @@ export default function Materials({ materials, checked, setChecked, catalogEnabl
   }, [groups, requested, catalogEnabled]);
   const { results, retry } = useCatalog(queries);
   const visibleGroups = Object.entries(groups).filter(([, items]) => items.length);
+  const checkout = checkoutLink(cart?.checkout_url);
 
   function request(query) {
     setRequested(previous => previous.has(query) ? previous : new Set(previous).add(query));
   }
+  useImperativeHandle(ref, () => ({
+    openShop() {
+      const first = [...groups['Still needed'], ...groups.Optional, ...groups.Gathered].find(item => materialQuery(item));
+      if (!first) return;
+      // Keep the shopper’s place when returning from another chapter.
+      if (expandedId == null) {
+        setExpandedId(first.id);
+        request(materialQuery(first));
+      }
+    },
+  }));
 
   // Keep keyboard focus on the same supply as it moves between groups.
   useLayoutEffect(() => {
@@ -201,6 +221,8 @@ export default function Materials({ materials, checked, setChecked, catalogEnabl
       <h2 id="supplies-title" tabIndex="-1">Materials &amp; tools</h2>
       <p className="meta" id="supply-count">{materials.length
         ? groups.Gathered.length + ' of ' + materials.length + ' gathered' : 'No supplies listed.'}</p>
+      {checkout && <a className="checkout-cart" href={checkout.href} rel="noopener noreferrer" target="_blank">
+        Review cart at {checkout.hostname} <span aria-hidden="true">↗</span></a>}
     </div>
     <div id="materials">{visibleGroups.map(([group, items]) => <div className="supply-group" key={group}>
       {(group !== 'Still needed' || visibleGroups.length > 1) && <h3>{group}</h3>}

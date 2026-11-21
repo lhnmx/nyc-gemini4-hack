@@ -53,8 +53,10 @@ def catalog_config(settings: Settings) -> tuple[str, str] | None:
             return None
         endpoint = f"{base}/api/ucp/mcp"
     else:
-        endpoint = GLOBAL_CATALOG
-    profile = https_url(settings.shopify_agent_profile_url.strip() or PUBLIC_PROFILE)
+        endpoint = settings.shopify_global_mcp_url.strip()
+        if not https_url(endpoint):
+            return None
+    profile = https_url(settings.shopify_profile_url or PUBLIC_PROFILE)
     return (endpoint, profile) if profile else None
 
 

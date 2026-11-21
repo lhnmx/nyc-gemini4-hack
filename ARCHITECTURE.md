@@ -2,9 +2,9 @@
 
 This document describes the hackathon design for **CraftPOV**. The diagrams include planned integrations.
 
-**What runs today.** The React workbench displays written steps and the workflow while FastAPI coordinates rendering. Each chapter can refer to a timestamped observation from the selected YouTube tutorial. Gemini Omni renders independent pieces in parallel. Connected actions can use the reviewed final frame of their physical predecessor. A vision reviewer checks the opening, contact and result before the next dependent shot. Gemini TTS reads the narration and FFmpeg assembles the film in chapter order with timed captions. Project state and job progress persist in SQLite.
+**What runs today.** The React workbench displays written steps and the workflow while FastAPI coordinates rendering. Each chapter can refer to a timestamped observation from the selected YouTube tutorial. Gemini Omni renders chapters in guide order by default. Operators can enable parallel rendering of independent pieces. Connected actions can use the reviewed final frame of their physical predecessor. A vision reviewer checks the opening, contact and result before the next dependent shot. Gemini TTS reads the narration and FFmpeg assembles the film in chapter order with timed captions. Project state and job progress persist in SQLite.
 
-**Shopify and UCP.** The workbench searches Shopify’s UCP catalog for material options, prices and merchant links. The public `/ucp-agent-profile.json` advertises the upstream shopping capabilities. In-app checkout, desk-photo inventory and live camera coaching remain planned. The API preserves the existing cart rebuild acknowledgement.
+**Shopify and UCP.** The workbench searches Shopify’s UCP catalog for material options, prices and merchant links while chapters render. The public `/ucp-agent-profile.json` advertises the shopping capabilities. A configured store can issue a hosted checkout link. The live coach supports voice and camera feedback. Intake stores desk photos for a future inventory feature.
 
 ---
 
@@ -147,16 +147,9 @@ sequenceDiagram
     - `start_state` → `hand_kinematics` → `end_state` (e.g., *"walnut-sized sage-green clay sphere → palms rolling in circular motion with light downward pressure → smooth slightly flattened oval torso"*).
     - Generates the **Visual Continuity Bible** (fixed camera tilt, workbench surface, lighting direction, hand appearance, color palette) injected into every POV prompt.
 
-### 4.3 Commerce Agent & Shopify MCP (`agents/commerce.py` — **Gemini 4 Neon**)
-- **Goal**: Turn the missing items in the BOM into a one-click checkout experience.
-- **Desk Inventory Diffing**: If the user uploads a photo of their workbench, **Neon** identifies already-owned tools/materials and marks them `owned=True` before shopping.
-- **Protocol**: Connects via **Model Context Protocol (MCP)** over Streamable HTTP to a Shopify Storefront MCP endpoint (`https://<store>.myshopify.com/api/mcp`).
-- **MCP Tool Flow**:
-  1. `search_shop_catalog`: Searches for each missing BOM item (e.g., `"air dry clay"`, `"wooden clay sculpting tool kit"`, `"acrylic paint set"`).
-  2. **Variant Selection**: Neon picks the best-fitting affordable SKU/variant and records a brief rationale.
-  3. `update_cart`: Adds selected variant IDs to a Shopify cart.
-  4. `get_cart`: Retrieves subtotal, line items, and the hosted `checkout_url`.
-- **Fallback**: Unstocked niche items are surfaced in `unmatched_materials` with a clean search query instead of failing the cart.
+### 4.3 Commerce Agent & Shopify MCP (`agents/commerce.py`)
+
+The agent uses the plan’s search queries to find missing materials in Shopify’s global catalog and configured store in parallel. It proposes merchant options with prices, chooses matching store variants for checkout and groups quantities when two materials resolve to the same variant. Shopify returns the cart subtotal and hosted checkout URL. Materials without a store match remain in `unmatched_materials`.
 
 ### 4.4 POV Media Generation Pipeline (`media/`)
 Generating coherent multi-step physical tutorials requires solving visual drift across clips. We use a **3-stage continuity pipeline**:
@@ -246,7 +239,9 @@ class ShoppingCartProposal(BaseModel):
 | `/api/projects` | `POST` | Submit a build goal + optional owned items / desk photo. Returns `project_id`. |
 | `/api/projects/{id}/events` | `GET` | Sends a full `snapshot` on every connection, followed by `status`, `research_complete`, `plan_ready`, step media updates, `full_video_ready` or `project_error`. A terminal status closes the stream. |
 | `/api/projects/{id}` | `GET` | Current plan, step media, full tutorial URL and status. `partial` retains available clips if another clip or the final assembly fails. |
-| `/api/projects/{id}/cart/rebuild` | `POST` | Returns the upstream acknowledgement and submitted owned material IDs for an existing project (HTTP 200). An unknown ID returns 404. |
+| `/api/projects/{id}/cart/rebuild` | `POST` | Rebuilds the proposal using the submitted owned material IDs. Saves the updated checklist and emits `cart_ready`. |
+| `/api/shopify/search`, `/api/shopify/cart` | `POST` | Search the global or store catalog and create a checkout cart with store variants. |
+| `/api/projects/{id}/coach/session`, `/api/projects/{id}/coach/inspect` | `POST` | Start a live coaching session or compare a submitted camera frame to the selected chapter. |
 | `/api/projects/{id}/steps/{step}/checkin` | `POST` | Reserved for camera coaching. Returns HTTP 501 for an existing project. |
 | `/media/{project_id}/{file}` | `GET` | Serves generated step MP4s, keyframes, voice clips, and stitched video. |
 
@@ -270,7 +265,7 @@ To directly answer the **Element 119** judging criteria without synthetic/script
 
 | Challenge | Architectural Choice | Why |
 | :--- | :--- | :--- |
-| **Video generation latency** | Stream `plan_ready` and `cart_ready` immediately via SSE; generate step clips in parallel and unlock each step as its MP4 lands. | Judges & users see the plan and live Shopify cart within seconds instead of waiting on all video renders. |
+| **Video generation latency** | Stream `plan_ready` and `cart_ready` via SSE, prepare narration during visual generation, and unlock each chapter as its MP4 lands. | Users can read the plan and browse the Shopify cart while the film is rendering. |
 | **Visual & physical drift between steps** | **Hydrogen** `PhysicalStateTransition` + shared `VisualContinuityBible` + keyframe conditioning. | Keeps workbench, lighting, hand pose, and clay geometry physically coherent across independent Veo calls. |
 | **Hands-on usability** | Default to **loopable per-step POV clips** + hands-free voiceover. | With clay on your hands, looping a 6-second POV clip of Step 3 beats scrubbing a 20-minute video. |
 | **Shopify (`shop.dev`) store coverage** | Storefront MCP with graceful `unmatched_materials` fallback + visual desk-substitution gating. | Keeps the live commerce demo resilient even if a store doesn't stock every niche sculpting tool. |

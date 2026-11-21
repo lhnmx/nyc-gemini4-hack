@@ -307,8 +307,11 @@ async def _discover_tutorials(
                 seen_ids.add(candidate.video_id)
         titles = " · ".join(c.title for c in candidates)
         search.detail = f"“{query}” · " + (titles or "No new tutorials found.")
-        search.sources = [ResearchSource(gate_name=_relevance_gate(i), title=c.title, url=c.url)
-                          for i, c in enumerate(candidates, start=first_index)]
+        search.sources = [
+            ResearchSource(gate_name=_relevance_gate(i), title=c.title, url=c.url,
+                           channel=c.channel, duration_seconds=c.duration_seconds)
+            for i, c in enumerate(candidates, start=first_index)
+        ]
     if not candidates:
         return [], []
 
@@ -356,9 +359,9 @@ async def research_goal_on_youtube(
                                    model=gemini.model_id("carbon") if on_activity else None,
                                    detail=" · ".join(filter(None, [candidate.title or candidate.url, candidate.channel]))) as analysis:
             result = await analyze_youtube_video(goal, candidate, gemini)
-            count = len(result.segments)
-            analysis.detail = f"{result.title} · {count} hands-on segment{'s' if count != 1 else ''}. " + " · ".join(
-                f"{s.timestamp_start} {s.technique}" for s in result.segments[:3])
+            analysis.source_segments = result.source_observations(candidate.video_id)
+            count = len(analysis.source_segments)
+            analysis.detail = f"{result.title} · {count} hands-on clip{'s' if count != 1 else ''}."
             return result
 
     seen_ids: set[str] = set()

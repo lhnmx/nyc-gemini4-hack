@@ -25,7 +25,7 @@ class GenerationContractTests(unittest.TestCase):
     @patch.dict(os.environ, clear=True)
     def test_shot_concurrency_and_optional_catalog_profile_settings(self):
         defaults = Settings(_env_file=None)
-        self.assertEqual(defaults.max_parallel_shots, 2)
+        self.assertEqual(defaults.max_parallel_shots, 1)
         self.assertEqual(defaults.shopify_agent_profile_url, "")
         profile = "https://catalog.example/profile.json"
         for limit in range(1, 5):
