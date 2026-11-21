@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from nyc_gemini4_hack.config import get_settings
+from nyc_gemini4_hack.config import Settings, get_settings
 from nyc_gemini4_hack.models import (
     CartLineItem,
     GlobalProductOption,
@@ -134,6 +134,14 @@ class ShopifyUCPClient:
         self.bearer_token = bearer_token.strip()
         self.timeout_seconds = timeout_seconds
         self._rpc_id = 0
+
+    @classmethod
+    def for_global_catalog(cls, settings: Settings) -> ShopifyUCPClient:
+        return cls(settings.shopify_global_mcp_url, settings.shopify_profile_url)
+
+    @classmethod
+    def for_store(cls, settings: Settings) -> ShopifyUCPClient:
+        return cls(settings.shopify_mcp_url, settings.shopify_profile_url, bearer_token=settings.shopify_storefront_token)
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -314,30 +322,24 @@ async def search_shopify_products(
     query: str,
     limit: int = 5,
     scope: str = "both",
+    *,
+    settings: Settings | None = None,
 ) -> dict[str, list[GlobalProductOption]]:
     """
     Standalone reusable search across Shopify Global Catalog MCP and/or the mock dev store.
     Frontend-agnostic: returns normalized GlobalProductOption lists under 'global' and 'store'.
     """
-    settings = get_settings()
+    settings = settings or get_settings()
     result: dict[str, list[GlobalProductOption]] = {"global": [], "store": []}
 
     async with httpx.AsyncClient(timeout=15.0) as http_client:
         tasks: list[tuple[str, Any]] = []
         if scope in ("global", "both") and settings.shopify_global_mcp_url.strip():
-            global_client = ShopifyUCPClient(
-                mcp_url=settings.shopify_global_mcp_url,
-                agent_profile_url=settings.shopify_ucp_agent_profile_url,
-                bearer_token=settings.shopify_storefront_token,
-            )
+            global_client = ShopifyUCPClient.for_global_catalog(settings)
             tasks.append(("global", global_client.search_catalog(query, limit=limit, client=http_client)))
 
         if scope in ("store", "both") and settings.shopify_mcp_url.strip():
-            store_client = ShopifyUCPClient(
-                mcp_url=settings.shopify_mcp_url,
-                agent_profile_url=settings.shopify_ucp_agent_profile_url,
-                bearer_token=settings.shopify_storefront_token,
-            )
+            store_client = ShopifyUCPClient.for_store(settings)
             tasks.append(("store", _search_store_with_fallback(store_client, query, http_client, limit=limit)))
 
         if not tasks:
@@ -360,19 +362,17 @@ async def search_shopify_products(
 
 async def create_mock_store_cart(
     items: list[ShopifyCartLineRequest],
+    *,
+    settings: Settings | None = None,
 ) -> ShoppingCartProposal:
     """
     Standalone reusable cart builder that always checks out on the configured mock dev store.
     """
-    settings = get_settings()
+    settings = settings or get_settings()
     if not settings.shopify_mcp_url.strip():
         raise ValueError("SHOPIFY_MCP_URL is not configured.")
 
-    store_client = ShopifyUCPClient(
-        mcp_url=settings.shopify_mcp_url,
-        agent_profile_url=settings.shopify_ucp_agent_profile_url,
-        bearer_token=settings.shopify_storefront_token,
-    )
+    store_client = ShopifyUCPClient.for_store(settings)
     merged: dict[str, int] = {}
     for item in items:
         merged[item.variant_id] = merged.get(item.variant_id, 0) + item.quantity
@@ -413,13 +413,15 @@ async def build_shopping_cart_proposal(
     materials: list[MaterialItem],
     owned_material_ids: set[str] | None = None,
     global_limit_per_item: int = 3,
+    *,
+    settings: Settings | None = None,
 ) -> ShoppingCartProposal:
     """
     Two-tier Shopify MCP commerce flow:
       1. Showcase multi-merchant options via Shopify Global Catalog MCP (`catalog.shopify.com/api/ucp/mcp`).
       2. Match & build a live checkout cart exclusively on the configured mock dev store (`SHOPIFY_MCP_URL`).
     """
-    settings = get_settings()
+    settings = settings or get_settings()
     owned_ids = owned_material_ids or set()
     needed = [
         m for m in materials
@@ -430,24 +432,8 @@ async def build_shopping_cart_proposal(
     if not needed:
         return ShoppingCartProposal(store_domain=store_domain)
 
-    global_client = (
-        ShopifyUCPClient(
-            mcp_url=settings.shopify_global_mcp_url,
-            agent_profile_url=settings.shopify_ucp_agent_profile_url,
-            bearer_token=settings.shopify_storefront_token,
-        )
-        if settings.shopify_global_mcp_url.strip()
-        else None
-    )
-    store_client = (
-        ShopifyUCPClient(
-            mcp_url=settings.shopify_mcp_url,
-            agent_profile_url=settings.shopify_ucp_agent_profile_url,
-            bearer_token=settings.shopify_storefront_token,
-        )
-        if settings.shopify_mcp_url.strip()
-        else None
-    )
+    global_client = ShopifyUCPClient.for_global_catalog(settings) if settings.shopify_global_mcp_url.strip() else None
+    store_client = ShopifyUCPClient.for_store(settings) if settings.shopify_mcp_url.strip() else None
 
     global_options: list[GlobalProductOption] = []
     matched_items: list[CartLineItem] = []

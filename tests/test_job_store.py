@@ -11,7 +11,9 @@ from unittest.mock import patch
 import httpx
 
 from nyc_gemini4_hack.job_store import JobStoreError, _turso_batch, open_job_store
-from nyc_gemini4_hack.models import ProjectState, ProjectStatus, StepMediaAsset
+from nyc_gemini4_hack.models import (
+    MaterialItem, MaterialStatus, ProjectState, ProjectStatus, ShoppingCartProposal, StepMediaAsset,
+)
 from tests.test_pipeline import paper_plan
 
 
@@ -77,6 +79,36 @@ class JobStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((recovered.status, revision), (ProjectStatus.FAILED, 1))
         updates = await self.reader.events_after(first.project_id, 1)
         self.assertEqual([(e["event"], e["data"]["status"]) for e in updates], [("status", "partial")])
+
+    async def test_user_cart_and_chapter_progress_survive_interleaved_writes(self):
+        await self.writer.enqueue(ProjectState(project_id="paper", goal="Fold a glider"))
+        render = await self.writer.claim("worker")
+        render.plan = paper_plan()
+        render.plan.materials = [MaterialItem(id="paper", name="Paper", search_query="origami paper")]
+        render.status = ProjectStatus.GENERATING
+        await self.writer.checkpoint("worker", render, "plan_ready", render.plan.model_dump())
+
+        # The browser starts rebuilding the cart, then a new chapter is published.
+        editor, _ = await self.reader.read(render.project_id)
+        render.media[1] = StepMediaAsset(step_number=1, status="ready", video_url="/media/paper/first.mp4")
+        await self.writer.checkpoint("worker", render, "step_media_ready", render.media[1].model_dump())
+        editor.plan.materials[0].status = MaterialStatus.OWNED_EXACT
+        editor.cart = ShoppingCartProposal(cart_id="user-selection")
+        self.assertTrue(await self.reader.update_cart(editor))
+        saved, revision = await self.reader.read(render.project_id)
+        self.assertEqual(saved.media, render.media)
+
+        # A late automatic proposal and the worker's old materials must not replace the user's cart.
+        render.cart = ShoppingCartProposal(cart_id="automatic")
+        self.assertTrue(await self.writer.checkpoint("worker", render, "cart_ready", render.cart.model_dump()))
+        self.assertEqual(await self.reader.read(render.project_id), (saved, revision))
+        render.status = ProjectStatus.COMPLETED
+        self.assertTrue(await self.writer.checkpoint("worker", render, "status", {"status": "completed"}))
+        saved, _ = await self.reader.read(render.project_id)
+        self.assertEqual((saved.status, saved.cart, saved.plan.materials), (render.status, editor.cart, editor.plan.materials))
+        events = await self.reader.events_after(render.project_id, 0)
+        self.assertEqual([e["event"] for e in events], ["plan_ready", "step_media_ready", "cart_ready", "status"])
+        self.assertEqual(events[2]["data"], editor.cart.model_dump(mode="json"))
 
     async def test_concurrent_first_use_and_duplicate_intake(self):
         state = ProjectState(project_id="once", goal="Make a guide")

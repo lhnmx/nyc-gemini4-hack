@@ -6,6 +6,7 @@ import logging
 import shutil
 import subprocess
 import wave
+from collections.abc import Callable
 from email.message import Message
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -13,17 +14,20 @@ from tempfile import TemporaryDirectory
 import imageio_ffmpeg
 
 from nyc_gemini4_hack.gemini_client import Gemini4Client
+from nyc_gemini4_hack.media.composer import run_media_work
 
 logger = logging.getLogger(__name__)
 
 
-def _check_wav(path: Path) -> None:
+def validate_narration_wav(path: Path) -> None:
     with wave.open(str(path), "rb") as recording:
         frames = recording.getnframes()
         frame_size = recording.getnchannels() * recording.getsampwidth()
         if not frames or recording.getframerate() <= 0:
             raise ValueError("The narration recording is empty or incomplete.")
-        if len(recording.readframes(frames)) != frames * frame_size:
+        # PCM frames are contiguous. Check the last declared frame to catch truncation.
+        recording.setpos(frames - 1)
+        if len(recording.readframes(1)) != frame_size:
             raise ValueError("The narration recording is empty or incomplete.")
 
 
@@ -57,7 +61,7 @@ def _write_audio(audio, out_wav: Path) -> None:
         ], input=raw, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30, check=True)
     else:
         raise ValueError(f"Unsupported speech audio format: {mime}")
-    _check_wav(out_wav)
+    validate_narration_wav(out_wav)
 
 
 async def _generate_gemini_audio(
@@ -66,14 +70,15 @@ async def _generate_gemini_audio(
     gemini: Gemini4Client,
     duration_seconds: int,
     timeout_s: float = 30.0,
-) -> None:
+) -> str:
     style = (
         "Speak like a patient craft teacher beside one learner. Start immediately and stress the action verb. "
         f"Aim for a natural reading in about {duration_seconds} seconds. Give measurements time to land."
     )
+    model = gemini.settings.audio_model
     async with asyncio.timeout(timeout_s):
         response = await gemini.client.aio.interactions.create(
-            model=gemini.settings.audio_model,
+            model=model,
             api_version="v1beta",
             input=[{
                 "type": "user_input",
@@ -86,10 +91,11 @@ async def _generate_gemini_audio(
             generation_config={"speech_config": [{"voice": gemini.settings.tts_voice}]},
             timeout=timeout_s,
         )
-    await asyncio.to_thread(_write_audio, response.output_audio, out_wav)
+    await run_media_work(_write_audio, response.output_audio, out_wav)
+    return model
 
 
-def _generate_local_tts(script: str, out_wav: Path) -> None:
+def _generate_local_tts(script: str, out_wav: Path) -> str:
     if say := shutil.which("say"):
         cmd = [
             say, "-r", "150", "--file-format=WAVE", "--data-format=LEI16@24000",
@@ -102,7 +108,8 @@ def _generate_local_tts(script: str, out_wav: Path) -> None:
     # stdin keeps the transcript separate from voice options.
     subprocess.run(cmd, input=script + "\n", text=True, stdout=subprocess.DEVNULL,
                    stderr=subprocess.PIPE, check=True, timeout=30)
-    _check_wav(out_wav)
+    validate_narration_wav(out_wav)
+    return Path(cmd[0]).name
 
 
 async def generate_step_voiceover(
@@ -111,6 +118,7 @@ async def generate_step_voiceover(
     gemini: Gemini4Client,
     prefer_gemini_audio: bool = True,
     duration_seconds: int = 6,
+    on_voice_model: Callable[[str], None] | None = None,
 ) -> Path:
     """Speak the script verbatim. Publish a WAV only after its audio is usable."""
     script = script.strip()
@@ -119,15 +127,16 @@ async def generate_step_voiceover(
     out_wav.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=out_wav.parent) as staging:
         candidate = Path(staging) / "voice.wav"
+        voice_model = None
         if prefer_gemini_audio:
             try:
-                await _generate_gemini_audio(script, candidate, gemini, duration_seconds)
+                voice_model = await _generate_gemini_audio(script, candidate, gemini, duration_seconds)
             except Exception as exc:
                 logger.warning("Gemini narration unavailable (%s); trying local speech.", type(exc).__name__)
                 candidate.unlink(missing_ok=True)
-            else:
-                candidate.replace(out_wav)
-                return out_wav
-        await asyncio.to_thread(_generate_local_tts, script, candidate)
+        if voice_model is None:
+            voice_model = await run_media_work(_generate_local_tts, script, candidate)
         candidate.replace(out_wav)
+        if on_voice_model is not None:
+            on_voice_model(voice_model)
     return out_wav

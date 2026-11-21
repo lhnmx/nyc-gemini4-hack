@@ -31,6 +31,7 @@ class Settings(BaseSettings):
 
     # Media Generation (POV Keyframes / Video / Voice)
     pov_media_mode: Literal["motion", "illustrated_frames"] = "motion"
+    max_parallel_shots: int = Field(default=1, ge=1, le=4)
     pov_video_model: str = Field(default="gemini-omni-1.2-flash")
     pov_image_model: str = Field(default="gemini-3.1-flash-image")
     audio_model: str = Field(default="gemini-3.8-flash-tts")
@@ -45,6 +46,7 @@ class Settings(BaseSettings):
 
     # Shopify Commerce (Global Catalog MCP + Mock Store UCP MCP)
     shopify_mcp_url: str = Field(default="")
+    shopify_agent_profile_url: str = Field(default="")
     shopify_global_mcp_url: str = Field(default="https://catalog.shopify.com/api/ucp/mcp")
     shopify_ucp_agent_profile_url: str = Field(
         default="https://cdn.jsdelivr.net/gh/lhnmx/nyc-gemini4-hack@b6ec64927c3feb6c0670ff0bf5715e33b590b208/ucp-agent-profile.json"
@@ -72,6 +74,10 @@ class Settings(BaseSettings):
     def ensure_output_dir(self) -> Path:
         self.media_output_dir.mkdir(parents=True, exist_ok=True)
         return self.media_output_dir
+
+    @property
+    def shopify_profile_url(self) -> str:
+        return self.shopify_agent_profile_url.strip() or self.shopify_ucp_agent_profile_url.strip()
 
     def readiness_summary(self) -> dict[str, object]:
         return {

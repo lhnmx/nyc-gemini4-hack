@@ -156,18 +156,37 @@ class JobStore:
         return ProjectState.model_validate_json(rows[0][0]) if rows else None
 
     async def checkpoint(self, worker_id: str, project: ProjectState, event_name: str, payload: dict) -> bool:
+        if event_name == "cart_ready":
+            # A user can rebuild the cart while the automatic catalog search is in flight.
+            cart_json = json.dumps(payload)
+            rows = await self._run(("""UPDATE craftpov_projects SET state=json_set(state,'$.cart',json(?1)),
+                revision=revision+1, last_event='cart_ready', last_payload=?1, lease_until=unixepoch()+120
+                WHERE id=?2 AND worker=?3 AND lease_until>unixepoch() AND json_extract(state,'$.cart') IS NULL
+                RETURNING revision""", (cart_json, project.project_id, worker_id)))
+            return bool(rows) or await self.heartbeat(worker_id, project.project_id)
+
         terminal = int(event_name == "status" and project.status.terminal)
-        rows = await self._run(("""UPDATE craftpov_projects SET state=?, revision=revision+1, last_event=?, last_payload=?,
+        # Media checkpoints only own the rendering state. Keep any cart and ownership
+        # changes made through the API after this worker read its copy of the project.
+        rows = await self._run(("""UPDATE craftpov_projects SET state=
+            CASE WHEN json_type(state,'$.cart')='object' AND json_type(state,'$.plan.materials')='array'
+                 THEN json_set(?1,'$.cart',json_extract(state,'$.cart'),'$.plan.materials',json_extract(state,'$.plan.materials'))
+                 ELSE ?1 END,
+            revision=revision+1, last_event=?, last_payload=?,
             worker=CASE WHEN ? THEN NULL ELSE worker END,
             lease_until=CASE WHEN ? THEN NULL ELSE unixepoch()+120 END
             WHERE id=? AND worker=? AND lease_until>unixepoch() RETURNING revision""",
             (project.model_dump_json(), event_name, json.dumps(payload), terminal, terminal, project.project_id, worker_id)))
         return bool(rows)
 
-    async def update(self, project: ProjectState, event_name: str, payload: dict) -> bool:
-        rows = await self._run(("""UPDATE craftpov_projects SET state=?, revision=revision+1, last_event=?, last_payload=?
-            WHERE id=? RETURNING revision""",
-            (project.model_dump_json(), event_name, json.dumps(payload), project.project_id)))
+    async def update_cart(self, project: ProjectState) -> bool:
+        if project.cart is None or project.plan is None:
+            raise ValueError("A cart update needs the cart and its planned materials.")
+        materials = [material.model_dump(mode="json") for material in project.plan.materials]
+        rows = await self._run(("""UPDATE craftpov_projects SET
+            state=json_set(state,'$.cart',json(?1),'$.plan.materials',json(?2)), revision=revision+1,
+            last_event='cart_ready', last_payload=?1 WHERE id=?3 RETURNING revision""",
+            (project.cart.model_dump_json(), json.dumps(materials), project.project_id)))
         return bool(rows)
 
 

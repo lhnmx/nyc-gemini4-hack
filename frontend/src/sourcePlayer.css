@@ -1,0 +1,12 @@
+.source-player { width: 100%; min-width: 0; }
+.source-player-frame iframe {
+  display: block; width: 100%; min-height: 200px; aspect-ratio: 16 / 9;
+  border: 0; border-radius: 6px; background: #202421;
+}
+.source-player-error {
+  display: grid; justify-items: start; align-content: center; gap: .5rem;
+  min-height: 6rem; padding: 1.25rem; background: var(--soft, #f5f6f2); color: var(--ink, #252b26);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.source-player-error p { margin: 0; }
+.source-player-error a { color: var(--accent); }

@@ -14,6 +14,16 @@ import imageio_ffmpeg
 CHAPTER_FPS = 24
 
 
+async def run_media_work(function, /, *args):
+    """Join local file/FFmpeg work before cancellation can release its workspace."""
+    task = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+
+
 def _wav_duration_seconds(wav_path: Path) -> float:
     with wave.open(str(wav_path), "rb") as wf:
         return wf.getnframes() / wf.getframerate()
@@ -140,7 +150,7 @@ async def compose_step_pov_video(
         "-af", "apad", "-ar", "48000", "-ac", "1", "-c:a", "aac", "-b:a", "160k",
         "-movflags", "+faststart", "-t", f"{total_frames / fps:.8f}",
     ])
-    await asyncio.to_thread(_render, cmd, out_mp4)
+    await run_media_work(_render, cmd, out_mp4)
     return out_mp4
 
 
@@ -173,5 +183,5 @@ async def stitch_full_tutorial(
                 "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
             ], out_mp4)
 
-    await asyncio.to_thread(_run)
+    await run_media_work(_run)
     return out_mp4

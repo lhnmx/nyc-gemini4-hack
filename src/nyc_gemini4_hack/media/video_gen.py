@@ -1,12 +1,20 @@
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 from google.genai import types
 
 from nyc_gemini4_hack.gemini_client import Gemini4Client
 from nyc_gemini4_hack.models import BuildStep, VisualContinuityBible
+
+
+def source_observations(step: BuildStep) -> str:
+    lines = []
+    for source in step.source_segments:
+        tools = ", ".join(source.tools_visible)
+        lines.append(f"{source.segment_id} ({source.start_seconds}–{source.end_seconds}s), {source.technique}: "
+                     f"{source.hand_action}. {source.notes or ''} {('Tools: ' + tools) if tools else ''}")
+    return "\n".join(lines)
 
 
 def _image_format(data: bytes) -> tuple[str, str]:
@@ -40,8 +48,7 @@ async def _generate_pov_frame(
     contents.append(prompt)
 
     model = gemini.settings.pov_image_model
-    response = await asyncio.to_thread(
-        gemini.client.models.generate_content,
+    response = await gemini.client.aio.models.generate_content(
         model=model,
         contents=contents,
         config=types.GenerateContentConfig(
@@ -76,8 +83,13 @@ async def generate_step_pov_frames(
     out_dir: Path,
     gemini: Gemini4Client,
     prev_step_end_frame: Path | None = None,
+    *,
+    reviewed_prefix: tuple[bytes, ...] = (),
+    correction: str = "",
 ) -> list[Path]:
     """Render the setup, point of contact, and inspectable result of one step."""
+    if len(reviewed_prefix) > 2:
+        raise ValueError("Only a reviewed opening and contact frame can seed illustrations.")
     style = (
         "Create one photorealistic landscape still from the maker's point of view. "
         "Frame the workpiece and the area being demonstrated together. Keep the camera fixed. "
@@ -86,9 +98,13 @@ async def generate_step_pov_frames(
         f"Light: {bible.lighting}. Palette: {bible.subject_palette}. Hands: {bible.hands_description}.\n"
         f"Step {step.step_number}, {step.title}.\n"
     )
+    observations = source_observations(step)
+    if observations:
+        style += f"Preserve the technique documented in these tutorial observations:\n{observations}\n"
     state = step.physical_state
     setup = (
         "Show the instant before the action begins. Preserve completed work from earlier steps.\n"
+        "Arrange the hands, supporting surface and loose parts in the specified starting positions.\n"
         f"Starting arrangement: {state.start_state}"
     )
     action = (
@@ -106,15 +122,23 @@ async def generate_step_pov_frames(
     )
     if state.verification_cues:
         result += "\nVisible evidence of completion: " + "; ".join(state.verification_cues)
+    if correction:
+        style += ("A previous take showed the following errors. Follow the planned physical states "
+                  "for each illustration and avoid reproducing these errors:\n" + correction + "\n")
 
     frames = []
     reference = prev_step_end_frame
-    for label, moment in (("1_start", setup), ("2_action", action), ("3_end", result)):
-        reference = await _generate_pov_frame(
-            prompt=style + moment,
-            out_path=out_dir / f"step_{step.step_number:02d}_{label}",
-            gemini=gemini,
-            reference_image_path=reference,
-        )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for index, (label, moment) in enumerate((("1_start", setup), ("2_action", action), ("3_end", result))):
+        out_path = out_dir / f"step_{step.step_number:02d}_{label}"
+        if index < len(reviewed_prefix):
+            image = reviewed_prefix[index]
+            _, suffix = _image_format(image)
+            reference = out_path.with_suffix(suffix)
+            reference.write_bytes(image)
+        else:
+            reference = await _generate_pov_frame(
+                prompt=style + moment, out_path=out_path, gemini=gemini, reference_image_path=reference,
+            )
         frames.append(reference)
     return frames

@@ -22,6 +22,117 @@ def extract():
 
 
 class ResearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_search_duration_lookup_uses_same_credentials_without_polluting_links(self):
+        goal = ("Fold a classic dart paper plane from a single rectangular sheet. "
+                "Demonstrate the simple pointed-nose design and open its two swept-back wings.")
+        def respond(request):
+            self.assertEqual(request.headers["X-Goog-Api-Key"], "offline")
+            self.assertNotIn("offline", str(request.url))
+            if request.url.path.endswith("/search"):
+                self.assertEqual(request.url.params["q"], "Fold a classic dart paper plane step by step tutorial")
+                return httpx.Response(200, json={"items": [
+                    {"id": {"videoId": "abcdefghijk"}, "snippet": {"title": "Fold &amp; Fly"}}
+                ]})
+            self.assertTrue(request.url.path.endswith("/videos"))
+            self.assertEqual(request.url.params["id"], "abcdefghijk")
+            return httpx.Response(200, json={"items": [
+                {"id": "abcdefghijk", "contentDetails": {"duration": "PT2M7S"}}
+            ]})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        settings = Settings(_env_file=None, youtube_api_key="offline")
+        with patch.object(researcher.httpx, "AsyncClient", return_value=client):
+            videos = await researcher.search_youtube_tutorials(goal, settings=settings)
+        self.assertEqual((videos[0].title, videos[0].duration_seconds), ("Fold & Fly", 127))
+
+    def test_query_retains_the_material_and_measurement_of_a_specific_build(self):
+        goal = "Make a bracelet from 0.5 mm cord; then show it in close-up."
+        self.assertEqual(researcher._tutorial_query(goal, broader=True), "Make a bracelet from 0.5 mm cord")
+
+    async def test_one_qualified_source_by_default_with_reserve_only_after_failure(self):
+        candidates = [researcher.YouTubeCandidate(key, f"https://youtu.be/{key}", title, "Maker", "", duration)
+                      for key, title, duration in [("aaaaaaaaaaa", "Full lesson", 760),
+                                                   ("bbbbbbbbbbb", "Quick tutorial", 130),
+                                                   ("ccccccccccc", "Product reel", 60)]]
+        service = Mock()
+        service.decide_batch = AsyncMock(return_value={
+            f"video_{i}_relevance": DecisionResult(gate_name=f"video_{i}_relevance", choice=choice, confidence=score)
+            for i, choice, score in [(1, "KEEP_TUTORIAL", .98), (2, "KEEP_TUTORIAL", .96), (3, "SKIP_FILLER", .99)]
+        })
+        with patch.object(researcher, "search_youtube_tutorials", AsyncMock(return_value=candidates)) as search:
+            for outputs, expected in [([extract()], ["Quick tutorial"]),
+                                      ([RuntimeError("unavailable"), extract()], ["Full lesson"])]:
+                with self.subTest(expected=expected):
+                    search.reset_mock()
+                    service.generate_structured = AsyncMock(side_effect=outputs)
+                    sources, decisions = await researcher.research_goal_on_youtube("Fold", service)
+                    self.assertEqual([source.title for source in sources], expected)
+                    self.assertEqual([decision.source_title for decision in decisions], [c.title for c in candidates])
+                    self.assertEqual([decision.source_url for decision in decisions], [c.url for c in candidates])
+                    self.assertEqual(service.generate_structured.await_count, len(outputs))
+                    urls = [c.kwargs["contents"][0].file_data.file_uri for c in service.generate_structured.await_args_list]
+                    self.assertEqual(urls, [candidates[1].url, candidates[0].url][:len(outputs)])
+                    self.assertEqual(search.await_args.kwargs["max_results"], 3)
+                    search.assert_awaited_once()
+
+    async def test_broader_search_after_rejection_or_unusable_footage_gates_only_new_sources(self):
+        goal = "Weave a round coaster. Show each pass of the thread."
+        first, second = [researcher.YouTubeCandidate(key, f"https://youtu.be/{key}", title, "Maker", "")
+                         for key, title in [("aaaaaaaaaaa", "First result"), ("bbbbbbbbbbb", "Second result")]]
+        for first_rejected in (True, False):
+            with self.subTest(first_rejected=first_rejected):
+                service = Mock()
+                service.model_id.return_value = "analyst"
+                service.generate_structured = AsyncMock(side_effect=(
+                    [extract()] if first_rejected else [ValueError("No usable footage"), extract()]
+                ))
+                choices = ["SKIP_FILLER" if first_rejected else "KEEP_TUTORIAL", "KEEP_TUTORIAL"]
+                service.decide_batch = AsyncMock(side_effect=[
+                    {f"video_{i}_relevance": DecisionResult(gate_name=f"video_{i}_relevance", choice=choice)}
+                    for i, choice in enumerate(choices, start=1)
+                ])
+                search = AsyncMock(side_effect=[[first], [first, second, second]])
+                report = AsyncMock()
+                decisions_report = AsyncMock()
+                with patch.object(researcher, "search_youtube_tutorials", search):
+                    sources, decisions = await researcher.research_goal_on_youtube(
+                        goal, service, on_activity=report, on_decisions=decisions_report,
+                    )
+                self.assertEqual([(c.kwargs["broader"], c.kwargs["max_results"]) for c in search.await_args_list],
+                                 [(False, 3), (True, 6)])
+                self.assertEqual([s.url for s in sources], [second.url])
+                self.assertEqual([(d.gate_name, d.choice, d.source_url) for d in decisions],
+                                 [("video_1_relevance", choices[0], first.url),
+                                  ("video_2_relevance", choices[1], second.url)])
+                self.assertEqual([c.args[0] for c in decisions_report.await_args_list],
+                                 [[decisions[0]], [decisions[1]]])
+                for i, call in enumerate(service.decide_batch.await_args_list, start=1):
+                    self.assertIn(goal, call.kwargs["context"])
+                    self.assertEqual(list(call.kwargs["questions"]), [f"video_{i}_relevance"])
+                events = [c.args[0] for c in report.await_args_list]
+                analysis = [e for e in events if e.id == "analyze-bbbbbbbbbbb"]
+                self.assertEqual(analysis[0].source_segments, [])
+                self.assertEqual(len(analysis[-1].source_segments), 1)
+                clip = analysis[-1].source_segments[0]
+                self.assertEqual((clip.source_url, clip.source_title, clip.start_seconds, clip.end_seconds,
+                                  clip.hand_action), (second.url, second.title, 2, 5, "Flatten the crease"))
+                for failed in (e for e in events if e.state == "failed"):
+                    self.assertEqual(failed.source_segments, [])
+                for key in ["source-search", "source-selection", "source-search-2", "source-selection-2"]:
+                    self.assertEqual([e.state for e in events if e.id == key], ["started", "completed"])
+                for suffix, decision in zip(["", "-2"], decisions, strict=True):
+                    start, done = [e for e in events if e.id == "source-search" + suffix]
+                    screen = next(e for e in events if e.id == "source-selection" + suffix and e.state == "started")
+                    self.assertEqual(start.sources, [])
+                    self.assertEqual(done.sources, screen.sources)
+                    self.assertEqual([s.model_dump() for s in screen.sources],
+                                     [{"gate_name": decision.gate_name, "title": decision.source_title,
+                                       "url": decision.source_url, "channel": "Maker", "duration_seconds": None}])
+                self.assertEqual([e.detail for e in events if e.id.startswith("source-search") and e.state == "started"],
+                                 ["Weave a round coaster step by step tutorial", "Weave a round coaster"])
+                analyzed = [call.kwargs["contents"][0].file_data.file_uri for call in service.generate_structured.await_args_list]
+                self.assertEqual(analyzed, [second.url] if first_rejected else [first.url, second.url])
+
     async def test_discovery_key_stays_out_of_urls_and_http_errors(self):
         cfg = Settings(_env_file=None, youtube_api_key="test-only-credential")
         seen = []
@@ -46,10 +157,12 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
             "video_1_relevance": DecisionResult(gate_name="video_1_relevance", choice="SKIP_FILLER"),
         })
         gemini.generate_structured = AsyncMock()
-        with patch.object(researcher, "search_youtube_tutorials", AsyncMock(return_value=[candidate])):
+        with patch.object(researcher, "search_youtube_tutorials", AsyncMock(return_value=[candidate])) as search:
             with self.assertRaisesRegex(RuntimeError, "No hands-on tutorials"):
                 await researcher.research_goal_on_youtube("Fold paper", gemini)
         gemini.generate_structured.assert_not_awaited()
+        self.assertEqual(search.await_count, 2)
+        gemini.decide_batch.assert_awaited_once()
 
     async def test_direct_links_are_deduplicated_before_limit_and_one_failure_isolated(self):
         a, b = "aaBBccDD11_", "eeFFggHH22-"
@@ -85,6 +198,26 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
         gemini.generate_structured.return_value = result.model_copy(update={"segments": []})
         with self.assertRaisesRegex(ValueError, "no hands-on segments"):
             await researcher.analyze_youtube_video("Fold", original, gemini)
+
+    async def test_analysis_discards_unusable_and_out_of_video_intervals(self):
+        candidate = researcher.YouTubeCandidate("abcdefghijk", "https://youtu.be/abcdefghijk",
+                                                "Clamp lesson", "Maker", "", duration_seconds=35)
+        result = extract()
+        observed = TutorialSegment(timestamp_start="00:12", timestamp_end="00:23",
+                                   technique="Tighten", hand_action="Turn the screw until the pads touch.")
+        result.segments = [
+            observed.model_copy(update={"timestamp_start": "near the start"}),
+            observed.model_copy(update={"timestamp_end": "00:12"}),
+            observed.model_copy(update={"timestamp_end": "00:11"}),
+            observed.model_copy(update={"timestamp_end": "00:70"}),
+            observed.model_copy(update={"timestamp_end": "00:36"}),
+            observed.model_copy(update={"hand_action": " "}), observed,
+        ]
+        gemini = Mock()
+        gemini.generate_structured = AsyncMock(return_value=result)
+        filtered = await researcher.analyze_youtube_video("Tighten a clamp", candidate, gemini)
+        self.assertEqual(filtered.segments, [observed])
+        gemini.generate_structured.assert_awaited_once()
 
     async def test_cancelled_extraction_never_becomes_a_plan_source(self):
         gemini = Mock()

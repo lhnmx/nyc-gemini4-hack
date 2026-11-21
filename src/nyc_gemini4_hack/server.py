@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import wave
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -25,6 +26,7 @@ from nyc_gemini4_hack.agents.commerce import (
 from nyc_gemini4_hack.config import Settings, get_settings
 from nyc_gemini4_hack.intake import creation_response, prepare_project
 from nyc_gemini4_hack.job_store import JobStore, JobStoreError, open_job_store
+from nyc_gemini4_hack.media.voice_gen import validate_narration_wav
 from nyc_gemini4_hack.models import (
     BuildPlan,
     CoachInspectResponse,
@@ -38,6 +40,7 @@ from nyc_gemini4_hack.models import (
     ShopifySearchRequest,
     ShoppingCartProposal,
 )
+from nyc_gemini4_hack.shopping import catalog_config, shopping_router
 
 logger = logging.getLogger(__name__)
 ProjectId = Annotated[str, ApiPath(pattern=r"^[a-zA-Z0-9_-]+$", max_length=96)]
@@ -104,6 +107,7 @@ def create_app(*, hosted: bool = False, settings: Settings | None = None) -> Fas
                     await asyncio.gather(job, return_exceptions=True)
 
     app = FastAPI(title="CraftPOV", version="0.1.0", lifespan=lifespan)
+    app.include_router(shopping_router(settings))
 
     @app.exception_handler(httpx.HTTPError)
     @app.exception_handler(JobStoreError)
@@ -113,6 +117,7 @@ def create_app(*, hosted: bool = False, settings: Settings | None = None) -> Fas
 
     async def readiness(request: Request) -> dict:
         provider = settings.readiness_summary()
+        provider["capabilities"]["material_catalog"] = catalog_config(settings) is not None
         store = request.app.state.store
         message = ""
         if store is None:
@@ -149,12 +154,35 @@ def create_app(*, hosted: bool = False, settings: Settings | None = None) -> Fas
             request.app.state.wake.set()
         return creation_response(state)
 
+    def playback_snapshot(row: Loaded) -> tuple[ProjectState, int]:
+        state, _ = row
+        if hosted or not state.status.terminal:
+            return row
+
+        # Older local guides saved the finished recording even when the visual failed.
+        directory = settings.media_output_dir.resolve() / state.project_id
+        for entry in state.activity:
+            if entry.stage != "narration" or entry.state != "completed" or entry.step_number is None:
+                continue
+            asset = state.media.get(entry.step_number)
+            if asset is None or asset.status != "error" or asset.audio_url:
+                continue
+            wav = directory / f"step_{entry.step_number:02d}_voice.wav"
+            try:
+                if not wav.resolve().is_relative_to(directory) or not wav.is_file():
+                    continue
+                validate_narration_wav(wav)
+            except (OSError, EOFError, RuntimeError, ValueError, wave.Error):
+                continue
+            asset.audio_url = f"/media/{state.project_id}/{wav.name}"
+        return row
+
     @app.get("/api/projects/{project_id}")
-    async def get_project(row: Loaded) -> ProjectState:
+    async def get_project(row=Depends(playback_snapshot)) -> ProjectState:
         return row[0]
 
     @app.get("/api/projects/{project_id}/events")
-    async def stream_project_events(row: Loaded, store: Store):
+    async def stream_project_events(store: Store, row=Depends(playback_snapshot)):
         state, last_revision = row
 
         async def events():
@@ -211,9 +239,11 @@ def create_app(*, hosted: bool = False, settings: Settings | None = None) -> Fas
         cart = await build_shopping_cart_proposal(
             materials=project.plan.materials,
             owned_material_ids=owned_set,
+            settings=settings,
         )
         project.cart = cart
-        await store.update(project, "cart_ready", cart.model_dump(mode="json"))
+        if not await store.update_cart(project):
+            raise HTTPException(404, "Project not found")
         return cart
 
     @app.post("/api/shopify/search")
@@ -223,6 +253,7 @@ def create_app(*, hosted: bool = False, settings: Settings | None = None) -> Fas
             query=body.query,
             limit=body.limit,
             scope=body.scope,
+            settings=settings,
         )
         return {
             "query": body.query,
@@ -235,7 +266,7 @@ def create_app(*, hosted: bool = False, settings: Settings | None = None) -> Fas
     async def shopify_create_cart(body: ShopifyCartRequest) -> ShoppingCartProposal:
         """Reusable standalone endpoint: create a live checkout cart on the mock dev store."""
         try:
-            return await create_mock_store_cart(body.items)
+            return await create_mock_store_cart(body.items, settings=settings)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
