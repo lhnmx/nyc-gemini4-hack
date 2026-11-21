@@ -1,12 +1,13 @@
+import json
 import unittest
 from unittest.mock import AsyncMock
 
 from pydantic import ValidationError
 
-from nyc_gemini4_hack.agents.planner import _HydrogenGroundingOutput, synthesize_build_plan
+from nyc_gemini4_hack.agents.planner import _HydrogenGroundingOutput, _WrittenPlan, synthesize_build_plan
 from nyc_gemini4_hack.models import (
     BuildPlan, BuildStep, MaterialItem, MaterialStatus, PhysicalStateTransition,
-    TutorialExtract, VisualContinuityBible,
+    TutorialExtract, TutorialSegment, VisualContinuityBible,
 )
 
 
@@ -49,6 +50,63 @@ def tutorial(url):
 
 
 class PlannerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_each_chapter_keeps_only_its_resolved_footage_and_time_range(self):
+        first_url = "https://www.youtube.com/watch?v=aaaaaaaaaaa"
+        second_url = "https://www.youtube.com/watch?v=bbbbbbbbbbb"
+        sources = [
+            TutorialExtract(video_id="aaaaaaaaaaa", url=first_url, title="Clamp setup", segments=[
+                TutorialSegment(timestamp_start="0:17", timestamp_end="0:23", technique="Seat jaw",
+                                hand_action="Slide the fixed jaw flush to the shoulder.", tools_visible=["clamp"],
+                                notes="The jaw is square to the bench."),
+                TutorialSegment(timestamp_start="0:25", timestamp_end="0:37", technique="Store jig",
+                                hand_action="Hang the spare jig on the peg."),
+            ]),
+            TutorialExtract(video_id="bbbbbbbbbbb", url=second_url, title="Tighten clamp", segments=[
+                TutorialSegment(timestamp_start="1:05:02", timestamp_end="1:05:10", technique="Turn handle",
+                                hand_action="Turn the handle clockwise until the pad meets the stock."),
+            ]),
+        ]
+        plan = make_plan()
+        draft = _WrittenPlan.model_validate(plan.model_dump())
+        draft.project_title = "Clamp a joint"
+        draft.source_youtube_urls = [first_url, "https://invented.invalid"]
+        draft.steps[0].title = "Seat the clamp"
+        draft.steps[0].instruction_text = "Slide the fixed jaw flush to the shoulder."
+        draft.steps[1].title = "Tighten the handle"
+        draft.steps[1].instruction_text = "Turn the handle until the pad contacts the stock."
+        draft.steps[0].source_segments = ["S1.1", "S1.1", "S1.72"]
+        draft.steps[1].source_segments = ["https://invented.invalid", "S2.1"]
+        draft.steps.append(draft.steps[0].model_copy(update={"step_number": 3, "source_segments": ["S9.4"]}))
+        service = AsyncMock()
+        service.generate_structured.side_effect = [draft, grounding(plan, [3, 2, 1])]
+        result = await synthesize_build_plan("Clamp a joint", sources, [], service)
+
+        self.assertEqual(service.generate_structured.await_count, 2)
+        draft_prompt, physical_prompt = [call.kwargs["contents"] for call in service.generate_structured.await_args_list]
+        self.assertIn('"segment_id":"S1.2"', draft_prompt)
+        chapters_line = next(line for line in physical_prompt.splitlines() if line.startswith("Chapters with"))
+        chapters = json.loads(chapters_line.split(": ", 1)[1])
+        self.assertEqual([[item["hand_action"] for item in chapter["observations"]] for chapter in chapters],
+                         [[sources[0].segments[0].hand_action], [sources[1].segments[0].hand_action], []])
+        self.assertNotIn("spare jig", physical_prompt)
+        self.assertNotIn("invented.invalid", physical_prompt)
+        reloaded = BuildPlan.model_validate_json(result.model_dump_json())
+        self.assertEqual(reloaded.source_youtube_urls, [first_url, second_url])
+        one, two, three = reloaded.steps
+        self.assertEqual([s.segment_id for s in one.source_segments], ["S1.1"])
+        self.assertEqual([s.segment_id for s in two.source_segments], ["S2.1"])
+        self.assertEqual(three.source_segments, [])
+        fixed, turning = one.source_segments[0], two.source_segments[0]
+        self.assertEqual((fixed.source_title, fixed.source_url, fixed.start_seconds, fixed.end_seconds),
+                         ("Clamp setup", first_url, 17, 23))
+        self.assertEqual((fixed.notes, fixed.tools_visible), ("The jaw is square to the bench.", ["clamp"]))
+        self.assertEqual((turning.source_url, turning.start_seconds, turning.end_seconds),
+                         (second_url, 3902, 3910))
+
+    def test_legacy_chapters_load_without_attributing_footage(self):
+        old = make_plan().model_dump(exclude={"steps": {"__all__": {"source_segments"}}})
+        self.assertTrue(all(step.source_segments == [] for step in BuildPlan.model_validate(old).steps))
+
     async def test_source_inventory_and_transitions_follow_observations(self):
         plan = make_plan()
         service = AsyncMock()
@@ -87,6 +145,8 @@ class PlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("narration_script", physical_schema)
         self.assertNotIn("pov_video_prompt", physical_schema)
         self.assertIn("one or two short sentences", draft)
+        self.assertIn("change the contact point, tool", draft)
+        self.assertNotIn("3–6", draft)
         self.assertIn("measurements, real waiting times and necessary safety precautions", draft)
         self.assertIn("one short, observable verification cue", revision)
         self.assertIn(written, revision)
@@ -108,7 +168,7 @@ class PlannerTests(unittest.IsolatedAsyncioTestCase):
         service.generate_structured.side_effect = [plan, updates]
         result = await synthesize_build_plan("Fold a two-piece model", [], [], service)
         self.assertEqual([step.visual_parent for step in result.steps], [-1, -1, 0, 2])
-        self.assertIn("same sheet of origami", service.generate_structured.await_args.kwargs["contents"])
+        self.assertIn("Preserve the workpiece and every completed change", service.generate_structured.await_args.kwargs["contents"])
 
         for unsafe_parent in (3, 4, 999):
             with self.subTest(unsafe_parent=unsafe_parent):

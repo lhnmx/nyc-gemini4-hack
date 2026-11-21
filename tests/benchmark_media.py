@@ -63,10 +63,17 @@ async def render(scenario: str, limit: int) -> Timing:
     async def provider(request):
         nonlocal active_shots, peak_shots
         body = json.loads(request.content)
+        if request.url.path.endswith(":generateContent"):
+            # Replay a successful review so dependent shots receive their reference image.
+            images = [part for content in body["contents"] for part in content["parts"] if "inlineData" in part]
+            findings = {name: {"verdict": "matches", "sample": sample, "observation": "Offline replay."}
+                        for name, sample in [("opening", 1), ("contact", (len(images) + 1) // 2), ("result", len(images))]}
+            return httpx.Response(200, json={"candidates": [{"content": {
+                "role": "model", "parts": [{"text": json.dumps(findings)}]}, "finishReason": "STOP"}]})
         kind = body["response_format"]["type"]
         if kind == "video":
             prompt = body["input"][0]["content"][-1]["text"]
-            data = next(data for title, data in videos.items() if f"Action: {title}. " in prompt)
+            data = next(data for title, data in videos.items() if f"Action — {title}:" in prompt)
             mime = "video/mp4"
             active_shots += 1
             peak_shots = max(peak_shots, active_shots)
@@ -102,7 +109,8 @@ async def render(scenario: str, limit: int) -> Timing:
             finally:
                 await gemini.aclose()
         assert full and full.stat().st_size and full.with_suffix(".vtt").is_file(), project.status_message
-        assert all(asset.status == "ready" for asset in project.media.values())
+        assert all(asset.status == "ready" and asset.shot_reviews[-1].status == "passed"
+                   for asset in project.media.values())
         assert peak_shots == (limit if scenario == "two-sheets" else 1)
         return Timing(ready_times[0], elapsed, peak_shots, hashlib.sha256(full.read_bytes()).hexdigest(),
                       hashlib.sha256(full.with_suffix(".vtt").read_bytes()).hexdigest())

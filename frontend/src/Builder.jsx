@@ -53,7 +53,7 @@ export default function Builder({ initial, health, onClose, onCreated, onSubmitt
     <form onSubmit={submit}>
       <label htmlFor="goal">Your project</label>
       <textarea id="goal" name="goal" ref={goalInput} rows="3" minLength="2" maxLength="300" required
-        placeholder="Fold a paper glider" defaultValue={initial?.goal ?? ''}
+        placeholder="Fold a paper plane" defaultValue={initial?.goal ?? ''}
         onChange={event => event.target.setCustomValidity('')} />
       <label htmlFor="owned">Supplies you have <span className="optional">(optional)</span></label>
       <input id="owned" name="owned_items" aria-describedby="owned-hint" placeholder="Origami paper, ruler, fine-tip markers" defaultValue={(initial?.owned_items || []).join(', ')} />

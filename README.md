@@ -27,7 +27,7 @@ Two jobs share one page. Someone gathering supplies needs a quantity. Someone mi
 
 ## Open the workbench
 
-The repository ships a finished example: **Fold a paper glider**. Five chapters, one sheet of printer paper, one film with captions. On a local server it is the page at `/`.
+The homepage opens **Fold a paper plane**, a seven-chapter guide to a classic dart. Its 52-second captioned film combines generated hand footage with labeled diagrams of each difficult fold. Each chapter links to the corresponding moment in the original demonstration.
 
 | Surface | Where |
 | --- | --- |
@@ -51,7 +51,7 @@ Creating a guide asks for the project (up to 300 characters) and an optional com
 - Films each chapter with **Gemini Omni** (`gemini-omni-1.2-flash` by default). A continuing action opens on the previous shot’s final frame. Independent pieces can render together.
 - Speaks the script with Gemini TTS, then muxes narration, captions, and a single chaptered MP4 with FFmpeg. Playback follows the plan’s order. The written step advances when the film crosses a chapter boundary.
 - Matches supplies the maker typed to the materials list, and lets them check items off in the tab.
-- Looks up missing supplies in the Shopify UCP catalog and links to the product or the store’s checkout. A Shop search link remains when the catalog is quiet.
+- Looks up required and optional supplies in the Shopify UCP catalog. Open a gathered item to see replacements. Each result links to the merchant’s product or checkout and shows the price when available. Empty or unavailable results can be retried.
 
 Set `POV_MEDIA_MODE=illustrated_frames` to render still keyframes instead of Omni motion. On a machine without cloud speech, macOS `say` or eSpeak can read the same script.
 
@@ -152,7 +152,7 @@ Open [http://localhost:8000](http://localhost:8000). Jobs land in SQLite at `SQL
 The CLI writes `outputs/{project_id}/project_state.json` and can render a saved plan later.
 
 ```bash
-uv run python -m nyc_gemini4_hack.cli "Fold a paper glider" --owned "paper" --skip-media
+uv run python -m nyc_gemini4_hack.cli "Fold a paper plane" --owned "paper" --skip-media
 uv run python -m nyc_gemini4_hack.cli --from-json outputs/PROJECT_ID/project_state.json
 uv run python -m nyc_gemini4_hack.cli "Sculpt a small clay bowl" --url "https://www.youtube.com/watch?v=VIDEO_ID" --max-videos 1
 ```
@@ -176,7 +176,7 @@ Copy [`.env.example`](.env.example).
 | Gating | `GEMINI_DECISIONS_ENABLED`, `GEMINI_DECISIONS_MODEL`, `GEMINI_DECISIONS_API_VERSION` |
 | Film | `POV_MEDIA_MODE`, `POV_VIDEO_MODEL`, `POV_IMAGE_MODEL`, `AUDIO_MODEL`, `TTS_VOICE` |
 | Discovery | `YOUTUBE_API_KEY` |
-| Catalog | `SHOPIFY_MCP_URL`, `SHOPIFY_SHOP_DOMAIN`, `SHOPIFY_STOREFRONT_TOKEN` — empty URL and domain use `https://catalog.shopify.com/api/ucp/mcp` |
+| Catalog | `SHOPIFY_MCP_URL` or `SHOPIFY_SHOP_DOMAIN` selects a store. Empty settings use Shopify’s global UCP catalog. `SHOPIFY_AGENT_PROFILE_URL` can override the published agent profile. |
 | Local files | `APP_HOST`, `APP_PORT`, `MEDIA_OUTPUT_DIR`, `SQLITE_PATH` |
 | Hosted | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `BLOB_READ_WRITE_TOKEN` |
 
@@ -200,7 +200,7 @@ src/nyc_gemini4_hack/
   shopping.py                  UCP catalog search
   job_store.py                 Local SQLite and Turso
   cloud_worker.py              Daemon that claims one job at a time
-  web/example/                 Paper-glider film, captions, and project.json
+  web/example/                 Paper-plane film, captions, and project.json
 frontend/src/                  React workbench (Vite 8)
 ucp-agent-profile.json         Shopify UCP agent profile
 ```
@@ -233,6 +233,7 @@ There is no `agents/commerce.py` and no `agents/coach.py` in this tree. Catalog 
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | Model routing, request lifecycle, and schemas. Its diagrams include the planned cart and camera coach. |
 | [`DESIGN_NOTES.md`](./DESIGN_NOTES.md) | Why the workbench is a guide and a player on one page |
 | [`docs/generation.md`](./docs/generation.md) | Shot continuity, parallel folds, and how long a film spends waiting on Omni |
+| [`docs/video-quality.md`](./docs/video-quality.md) | 2026 research, timestamped source footage, and visual checks on rendered actions |
 | [`DEPLOYMENT.md`](./DEPLOYMENT.md) | Vercel, Turso, Blob, and the rendering daemon |
 | [`docs/STATUS.md`](./docs/STATUS.md) | An earlier checkpoint. The status table in this README matches the current tree. |
 

@@ -6,7 +6,7 @@ Independent workpieces can render at the same time. Each fold of a single paper 
 
 The grounded plan records which shot supplies each chapter's opening frame. A value of `-1` in `visual_parent` continues the preceding chapter, `0` starts an independent setup, and a positive value names the earlier chapter whose workpiece is returning to camera. Older plans default to the preceding chapter. Each setup uses the same description of the maker, work surface, framing and lighting.
 
-After each shot downloads and passes validation, the worker extracts its final frame on the 24 fps playback timeline. A child shot can start as soon as that frame exists, while its parent receives narration and captions. A failed shot's children resume from their written opening states. Independent sequences share up to two visual requests per project. Set `MAX_PARALLEL_SHOTS` to a value from 1 through 4 to adjust this limit. Narration and chapter assembly each have a separate limit of two active jobs.
+The worker samples each downloaded shot on the 24 fps playback timeline. When visual review passes, its child can start with that final frame while narration, captions and encoding finish. A child whose parent has no verified frame uses its written opening state. Independent sequences share up to two active visual jobs per project. Set `MAX_PARALLEL_SHOTS` to a value from 1 through 4 to adjust this limit. Narration and chapter assembly each have a separate limit of two active jobs. [Visual review and source attribution](video-quality.md)
 
 The workbench receives a chapter's start event when a visual slot opens and its ready event once its playable files are published. A later chapter can become ready before an earlier chapter. The full film, combined captions and chapter seek positions always use the plan's order.
 
@@ -18,7 +18,7 @@ The worker requests 16:9, 720p footage from `gemini-omni-1.2-flash` through the 
 
 The benchmark replays committed example MP4s and WAVs through the Google SDK's async HTTP transport. Each video response takes 1.4 s and each voice response takes 0.3 s. The worker performs real decoding, continuity-frame extraction, narration handling, 720p chapter encoding, caption alignment and final assembly. The first timestamp is the first playable chapter event. The second is the availability of the full MP4 and WebVTT captions locally. Timings exclude research, planning and hosted uploads.
 
-The single-glider replay uses the original sequence of five dependent folds. The two-sheet replay alternates between two sheets folded independently for five chapters, with each continuing fold referring to its own sheet. Both scenarios run at one and two permitted visual requests. The benchmark counts requests actually in flight and compares both MP4 and caption bytes across runs.
+The single-workpiece replay uses the bundled example’s dependent folds. The two-sheet replay alternates between two sheets folded independently for five chapters, with each continuing fold referring to its own sheet. Both scenarios run at one and two permitted visual requests. The benchmark counts requests in flight and compares MP4 and caption bytes across runs. The following historical medians used the original five-chapter example.
 
 | Five-chapter replay | Shot limit | Peak simultaneous video requests | Median first playable chapter | Median full film |
 | --- | ---: | ---: | ---: | ---: |
@@ -28,6 +28,8 @@ The single-glider replay uses the original sequence of five dependent folds. The
 | Two sheets | 2 | 2 | 2.092 s | 5.359 s |
 
 Across three runs per setting, the two-sheet film finished **37.4% sooner** at the higher limit. Each scenario produced byte-identical films and captions at both limits. All single-glider runs kept one video request in flight. These worker measurements used temporary definitions for the new project metadata, concurrency setting and voice-source callback during integration. Provider responses were replayed locally.
+
+With the integrated renderer and new paper-plane assets, a two-sheet replay took 10.54 seconds with one visual job and 7.55 seconds with two. Both settings produced identical MP4 and caption bytes. This comparison uses canned successful review responses to isolate scheduling and encoding. Live verification adds model latency and can request a second take.
 
 Run `uv run python tests/benchmark_media.py` for three alternating comparisons per scenario. Use `--scenario two-sheets --runs 1` for one short comparison. Each render writes to a temporary folder.
 

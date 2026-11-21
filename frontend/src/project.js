@@ -50,6 +50,19 @@ export function youtubeLinks(sources = []) {
   return [...links];
 }
 
+export function chapterSourceLinks(segments) {
+  if (!Array.isArray(segments)) return [];
+  const links = [];
+  for (const segment of segments) {
+    const start = segment?.start_seconds;
+    const end = segment?.end_seconds;
+    if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(end) || end <= start) continue;
+    const [source] = youtubeLinks([segment.source_url]);
+    if (source) links.push({ ...segment, href: source + '&t=' + start + 's' });
+  }
+  return links;
+}
+
 export function useHealth(refresh) {
   const [health, setHealth] = useState({ label: 'Checking services', detail: 'Checking guide generation services…' });
   useEffect(() => {

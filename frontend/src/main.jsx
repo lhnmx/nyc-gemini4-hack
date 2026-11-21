@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import Builder from './Builder.jsx';
-import { Film, Progress } from './Film.jsx';
+import { Film } from './Film.jsx';
 import { GuideMeta, GuideReferences, GuideStep, Sidebar, StepPicker, useSelection } from './Guide.jsx';
 import { chapterRenderState, chapterStarts, isFinished, legacyMediaStage, mediaActivity, mediaUrl, useHealth, useProject, youtubeLinks } from './project.js';
 import './workbench.css';
@@ -22,7 +22,7 @@ function Workbench({ route, onCreated }) {
   const example = !route.id && !submission;
   const plan = project?.plan;
   const steps = plan?.steps || [];
-  const selection = useSelection(route.id || 'paper-glider', steps.length);
+  const selection = useSelection(route.id || 'paper-plane', steps.length);
   const sources = youtubeLinks(plan?.source_youtube_urls);
   const starts = chapterStarts(steps, project?.media);
   const asset = path => mediaUrl(path, project?.project_id, example);
@@ -94,7 +94,7 @@ function Workbench({ route, onCreated }) {
                 <StepPicker chapters={chapters} index={selection.index} onSelect={selectStep} />
                 <GuideStep steps={steps} index={selection.index} headingRef={heading} onSelect={selectStep}
                   onWatch={selected?.state === 'ready' && !preview ? selectStep : null} />
-              </div> : project && <Progress project={project} connection={connection} />}
+              </div> : null}
             </div>}
           {plan && <GuideReferences plan={plan} sources={sources} checked={selection.checked} setChecked={selection.setChecked}
             catalogEnabled={health.catalogEnabled === true} />}

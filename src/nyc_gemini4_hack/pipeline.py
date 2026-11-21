@@ -14,7 +14,7 @@ from nyc_gemini4_hack.media.composer import (
     NarratedChapter, caption_chapter, compose_step_pov_video, stitch_full_tutorial,
     _wav_duration_seconds, run_media_work, write_tutorial_captions,
 )
-from nyc_gemini4_hack.media.motion_gen import MotionShot, compose_motion_with_voice, generate_motion_shot
+from nyc_gemini4_hack.media.motion_gen import MotionShot, ShotRejected, compose_motion_with_voice, generate_motion_shot
 from nyc_gemini4_hack.media.video_gen import generate_step_pov_frames
 from nyc_gemini4_hack.media.voice_gen import generate_step_voiceover
 from nyc_gemini4_hack.models import (
@@ -107,11 +107,13 @@ async def generate_media_for_plan(
     project.activity = [entry for entry in project.activity
                         if entry.stage not in media_stages or entry.step_number in retained_steps]
 
-    async def activity(stage, state, step: BuildStep | None = None, model: str | None = None) -> None:
+    async def activity(stage, state, step: BuildStep | None = None, model: str | None = None,
+                       detail: str = "") -> None:
         label, agent = media_stages[stage]
         number = step.step_number if step else None
         entry = AgentActivity(id=f"{stage}-{number or 'film'}", stage=stage, state=state, agent=agent,
-                              label=label if step else "Full film assembly", step_number=number, model=model)
+                              label=label if step else "Full film assembly", step_number=number, model=model,
+                              detail=detail)
         project.record_activity(entry)
         await emit("activity", entry.model_dump())
 
@@ -150,7 +152,7 @@ async def generate_media_for_plan(
     ) -> MotionShot | list[Path] | Exception:
         # Wait outside the semaphore so a dependent fold cannot occupy an independent shot's slot.
         source = await parent if parent is not None else None
-        reference = source.end_frame if isinstance(source, MotionShot) else None
+        reference = source.continuity_frame if isinstance(source, MotionShot) else None
         if isinstance(source, list) and source:
             reference = source[-1]
         async with shot_slots:
@@ -165,7 +167,8 @@ async def generate_media_for_plan(
     async def fail_step(asset: StepMediaAsset, stage: str, error: Exception) -> None:
         logger.error("Failed to generate %s for step %s", stage, asset.step_number, exc_info=error)
         asset.status = "error"
-        asset.error = f"Step {asset.step_number} {stage} could not be generated."
+        asset.error = (f"Step {asset.step_number} footage was withheld after visual review."
+                       if isinstance(error, ShotRejected) else f"Step {asset.step_number} {stage} could not be generated.")
         await emit("step_media_error", asset.model_dump())
 
     async def finish(index: int, step: BuildStep, footage: asyncio.Task, recording: asyncio.Task) -> None:
@@ -173,11 +176,24 @@ async def generate_media_for_plan(
         asset = project.media[number]
         shot = await footage
         if isinstance(shot, Exception):
-            await activity("motion", "failed", step, visual_model)
+            if isinstance(shot, ShotRejected):
+                asset.video_model = visual_model
+                asset.shot_reviews = shot.reviews
+            await activity("motion", "failed", step, visual_model,
+                           "Footage withheld after visual review." if isinstance(shot, ShotRejected) else "")
             await fail_step(asset, "motion footage" if mode == "motion" else "illustrations", shot)
             return
         asset.video_model = visual_model
-        await activity("motion", "completed", step, visual_model)
+        detail = ""
+        if isinstance(shot, MotionShot):
+            asset.shot_reviews = list(shot.reviews)
+            last = shot.reviews[-1]
+            detail = {
+                "passed": f"Visual review passed on take {last.attempt} across {len(last.sampled_seconds)} frames.",
+                "uncertain": "The visual review was inconclusive.",
+                "unavailable": "Visual review was unavailable.",
+            }[last.status]
+        await activity("motion", "completed", step, visual_model, detail)
         audio = await recording
         if isinstance(audio, Exception):
             await fail_step(asset, "narration", audio)

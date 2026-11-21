@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ProjectStatus(StrEnum):
@@ -43,15 +44,51 @@ class DecisionResult(BaseModel):
     model_used: str = ""
     via_decisions_api: bool = False
     source_title: str | None = None
+    source_url: str | None = None
 
 
-class TutorialSegment(BaseModel):
-    timestamp_start: str
-    timestamp_end: str
+class ObservedTechnique(BaseModel):
     technique: str
     hand_action: str
     tools_visible: list[str] = Field(default_factory=list)
     notes: str = ""
+
+
+def _timestamp_seconds(timestamp: str) -> int | None:
+    match = re.fullmatch(r"(?:([0-9]{1,3}):([0-5][0-9])|([0-9]{1,4})):([0-5][0-9])", timestamp.strip())
+    if not match:
+        return None
+    hours, minutes, total_minutes, seconds = match.groups()
+    return int(hours or 0) * 3600 + int(minutes or total_minutes) * 60 + int(seconds)
+
+
+class TutorialSegment(ObservedTechnique):
+    timestamp_start: str
+    timestamp_end: str
+
+    @property
+    def time_range_seconds(self) -> tuple[int, int] | None:
+        start = _timestamp_seconds(self.timestamp_start)
+        end = _timestamp_seconds(self.timestamp_end)
+        if start is None or end is None or end <= start:
+            return None
+        return start, end
+
+
+class StepSourceSegment(ObservedTechnique):
+    """A chapter observation resolved from the footage analyst's timestamped extract."""
+
+    segment_id: str
+    source_url: str
+    source_title: str
+    start_seconds: int = Field(ge=0)
+    end_seconds: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def forward_interval(self) -> StepSourceSegment:
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("A source segment must end after it starts.")
+        return self
 
 
 class TutorialExtract(BaseModel):
@@ -111,6 +148,7 @@ class BuildStep(BaseModel):
     narration_script: str
     pov_video_prompt: str
     physical_state: PhysicalStateTransition
+    source_segments: list[StepSourceSegment] = Field(default_factory=list)
     tips: list[str] = Field(default_factory=list)
     duration_seconds: int = Field(default=6, ge=1)
 
@@ -169,11 +207,35 @@ class ShoppingCartProposal(BaseModel):
     unmatched_materials: list[str] = Field(default_factory=list)
 
 
+class FrameFinding(BaseModel):
+    verdict: Literal["matches", "contradicts", "unclear"]
+    sample: int = Field(ge=1, description="One-based index of the observed frame in the sample sequence.")
+    observation: str = Field(min_length=1)
+
+
+class ShotReview(BaseModel):
+    attempt: int = Field(ge=1, le=2)
+    status: Literal["passed", "rejected", "uncertain", "unavailable"]
+    model: str
+    source_segment_ids: list[str] = Field(default_factory=list)
+    sampled_seconds: list[float] = Field(default_factory=list)
+    opening: FrameFinding | None = None
+    contact: FrameFinding | None = None
+    result: FrameFinding | None = None
+    reference_mode: Literal["text", "first_frame", "first_last_frames"]
+    target_origin: Literal["reviewed_render", "reviewed_illustration"] | None = None
+    target_image_model: str | None = None
+    target_preparation_seconds: float | None = Field(default=None, ge=0)
+    render_seconds: float = Field(ge=0)
+    review_seconds: float = Field(ge=0)
+
+
 class StepMediaAsset(BaseModel):
     step_number: int
     status: str = "pending"  # pending, generating, ready, error or skipped
     media_mode: Literal["motion", "illustrated_frames"] | None = None
     video_model: str | None = None
+    shot_reviews: list[ShotReview] = Field(default_factory=list)
     voice_model: str | None = None
     keyframe_url: str | None = None
     video_url: str | None = None
@@ -198,6 +260,12 @@ class ProjectEvent(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class ResearchSource(BaseModel):
+    gate_name: str
+    title: str
+    url: str
+
+
 class AgentActivity(BaseModel):
     id: str
     stage: Literal["research", "planning", "motion", "narration", "assembly"]
@@ -206,6 +274,7 @@ class AgentActivity(BaseModel):
     agent: str
     model: str | None = None
     detail: str = ""
+    sources: list[ResearchSource] = Field(default_factory=list)
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     step_number: int | None = Field(default=None, ge=1)
 

@@ -12,7 +12,7 @@ function priceLabel(price) {
 
 const materialQuery = item => (item.search_query?.trim() || item.name.trim()).slice(0, 300);
 
-function useCatalog(needed, enabled) {
+function useCatalog(queries) {
   const [results, setResults] = useState(() => new Map());
   const requests = useRef(new Map());
   useEffect(() => {
@@ -24,13 +24,8 @@ function useCatalog(needed, enabled) {
   }, []);
   useEffect(() => {
     const active = requests.current;
-    const queries = new Set(enabled ? needed.map(materialQuery).filter(Boolean) : []);
-    for (const [query, request] of active) {
-      if (!queries.has(query)) {
-        request.abort();
-        active.delete(query);
-      }
-    }
+    // A lookup already under way can finish while its material moves into Gathered.
+    for (const query of active.keys()) if (results.has(query)) active.delete(query);
 
     async function search(query, request) {
       let result;
@@ -46,7 +41,7 @@ function useCatalog(needed, enabled) {
         result = { error: true };
       }
       if (!request.signal.aborted) {
-        active.delete(query);
+        // Keep the slot until React commits this result, including during intervening renders.
         setResults(previous => new Map(previous).set(query, result));
       }
     }
@@ -59,18 +54,19 @@ function useCatalog(needed, enabled) {
       active.set(query, request);
       search(query, request);
     }
-  }, [needed, enabled, results]);
-  return results;
+  }, [queries, results]);
+  function retry(query) {
+    setResults(previous => {
+      if (!previous.has(query)) return previous;
+      const next = new Map(previous);
+      next.delete(query);
+      return next;
+    });
+  }
+  return { results, retry };
 }
 
-function ShopLink({ query, name }) {
-  const url = new URL('https://shop.app/search/results');
-  url.searchParams.set('query', query);
-  return <a className="shop-link" href={url.href} target="_blank" rel="noopener noreferrer"
-    aria-label={'Search Shop by Shopify for ' + name}>Search Shop by Shopify <span aria-hidden="true">↗</span></a>;
-}
-
-function ProductCarousel({ products, name, query }) {
+function ProductCarousel({ products, name }) {
   const [index, setIndex] = useState(0);
   const slideId = useId();
   const count = products.length;
@@ -91,6 +87,12 @@ function ProductCarousel({ products, name, query }) {
     }
   }
 
+  const description = <>
+    <span className="catalog-title">{product.title}{product.url && <span aria-hidden="true"> ↗</span>}</span>
+    <span className="catalog-meta" id={slideId + '-details'}><span className="catalog-price">{priceLabel(product.price)}</span>
+      {' · '}{seller}{product.variant && ' · ' + product.variant}</span>
+  </>;
+
   return <div className="catalog-carousel" role="group" aria-roledescription={count > 1 ? 'carousel' : undefined}
     aria-label={'Shopify products for ' + name}>
     <div aria-live="polite" aria-atomic="true">
@@ -99,47 +101,67 @@ function ProductCarousel({ products, name, query }) {
         {product.image_url && <img key={product.image_url} className="catalog-image" src={product.image_url} alt=""
           loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={event => { event.currentTarget.hidden = true; }} />}
         <div className="catalog-copy">
-          <p className="catalog-seller">{seller}</p>
-          {product.url ? <a className="catalog-title" href={product.url} target="_blank" rel="noopener noreferrer">
-            {product.title} <span aria-hidden="true">↗</span></a> : <strong className="catalog-title">{product.title}</strong>}
-          {product.variant && <p className="catalog-variant">{product.variant}</p>}
-          <div className="catalog-buy">
-            <span className={'catalog-price' + (product.price ? '' : ' unavailable')}>{priceLabel(product.price)}</span>
-            {product.checkout_url && <a className="catalog-checkout" href={product.checkout_url} target="_blank" rel="noopener noreferrer"
-              aria-label={'Checkout at the store for ' + product.title}>Checkout at store <span aria-hidden="true">↗</span></a>}
-          </div>
+          {product.url ? <a className="catalog-product" href={product.url} target="_blank" rel="noopener noreferrer"
+            aria-label={product.title} aria-describedby={slideId + '-details'}>{description}</a> : description}
+          {product.checkout_url && <a className="catalog-checkout" href={product.checkout_url} target="_blank" rel="noopener noreferrer"
+            aria-label={'Checkout at the store for ' + product.title}>Checkout at store <span aria-hidden="true">↗</span></a>}
         </div>
       </div>
     </div>
-    <div className="catalog-footer">
-      {count > 1 && <div className="catalog-controls" role="group" aria-label={'Browse products for ' + name} onKeyDown={navigate}>
-        <button type="button" aria-label={'Previous product for ' + name} aria-controls={slideId} onClick={() => setIndex(move(-1))}>←</button>
-        {products.map((offer, i) => <button type="button" className="catalog-dot" key={offer.checkout_url || offer.url}
-          data-choice={i} aria-label={`Show product ${i + 1} of ${count} for ${name}`} aria-current={i === selected ? 'true' : undefined}
-          aria-controls={slideId} onClick={() => setIndex(i)}><i aria-hidden="true" /></button>)}
-        <button type="button" aria-label={'Next product for ' + name} aria-controls={slideId} onClick={() => setIndex(move(1))}>→</button>
-      </div>}
-      <ShopLink query={query} name={name} />
-    </div>
+    {count > 1 && <div className="catalog-controls" role="group" aria-label={'Browse products for ' + name} onKeyDown={navigate}>
+      <button type="button" aria-label={'Previous product for ' + name} aria-controls={slideId} onClick={() => setIndex(move(-1))}>←</button>
+      {products.map((offer, i) => <button type="button" className="catalog-dot" key={offer.checkout_url || offer.url}
+        data-choice={i} aria-label={`Show product ${i + 1} of ${count} for ${name}`} aria-current={i === selected ? 'true' : undefined}
+        aria-controls={slideId} onClick={() => setIndex(i)}><i aria-hidden="true" /></button>)}
+      <button type="button" aria-label={'Next product for ' + name} aria-controls={slideId} onClick={() => setIndex(move(1))}>→</button>
+    </div>}
   </div>;
 }
 
-function MaterialShopping({ item, enabled, result }) {
-  const query = materialQuery(item);
-  if (!query) return null;
-  if (enabled && result?.products?.length) {
-    return <ProductCarousel key={query} products={result.products} name={item.name} query={query} />;
+function MaterialShopping({ name, searching, result, onRetry }) {
+  if (result?.products?.length) {
+    return <ProductCarousel products={result.products} name={name} />;
   }
-  return <div className="catalog-fallback">
-    {enabled && <p className="catalog-status" role="status">{!result ? 'Searching Shopify…' : result.error
-      ? 'Shopify’s catalog is unavailable.' : 'No matching products found.'}</p>}
-    <ShopLink query={query} name={item.name} />
+  const pending = !result && searching;
+  return <div className="catalog-message">
+    <p className="catalog-status" role="status">{pending ? 'Searching Shopify…' : result?.products
+      ? 'No matching Shopify products found.' : 'Shopify’s catalog is unavailable.'}</p>
+    {!pending && <button className="catalog-retry" type="button" onClick={onRetry}
+      aria-label={'Retry Shopify search for ' + name}>Try again</button>}
   </div>;
+}
+
+function SupplyRow({ item, gathered, expanded, result, searching, onToggle, onCheck, onRetry }) {
+  const panelId = useId();
+  const offerCount = result?.products?.length;
+  const offerLabel = offerCount == null ? 'offers' : offerCount + (offerCount === 1 ? ' offer' : ' offers');
+
+  return <li className="supply-row">
+    <label className="supply-check">
+      <input type="checkbox" value={item.id} checked={gathered} onChange={event => onCheck(event.target.checked)} />
+      <span className="supply-description">
+        <span className="supply-name">{item.name}</span>
+        {item.quantity && <span className="supply-quantity">{item.quantity}</span>}
+        {item.substitute_note && <small className="supply-note">{item.substitute_note}</small>}
+      </span>
+    </label>
+    {materialQuery(item) && <>
+      <button className="catalog-toggle" type="button" aria-expanded={expanded} aria-controls={panelId}
+        aria-label={`Shopify ${offerLabel} for ${item.name}`} onClick={onToggle}>
+        Shopify{offerCount != null && <span className="catalog-count">{offerCount}</span>}
+      </button>
+      <div className="catalog-panel" id={panelId} hidden={!expanded}>
+        {expanded && <MaterialShopping name={item.name} result={result} searching={searching} onRetry={onRetry} />}
+      </div>
+    </>}
+  </li>;
 }
 
 export default function Materials({ materials, checked, setChecked, catalogEnabled }) {
   const focusId = useRef(null);
   const section = useRef(null);
+  const [requested, setRequested] = useState(() => new Set());
+  const [expandedId, setExpandedId] = useState(null);
   const groups = useMemo(() => {
     const grouped = { 'Still needed': [], Gathered: [], Optional: [] };
     for (const item of materials) {
@@ -148,7 +170,22 @@ export default function Materials({ materials, checked, setChecked, catalogEnabl
     }
     return grouped;
   }, [materials, checked]);
-  const results = useCatalog(groups['Still needed'], catalogEnabled);
+  const queries = useMemo(() => {
+    const queries = new Set(requested);
+    if (catalogEnabled) {
+      for (const item of [...groups['Still needed'], ...groups.Optional]) {
+        const query = materialQuery(item);
+        if (query) queries.add(query);
+      }
+    }
+    return queries;
+  }, [groups, requested, catalogEnabled]);
+  const { results, retry } = useCatalog(queries);
+  const visibleGroups = Object.entries(groups).filter(([, items]) => items.length);
+
+  function request(query) {
+    setRequested(previous => previous.has(query) ? previous : new Set(previous).add(query));
+  }
 
   // Keep keyboard focus on the same supply as it moves between groups.
   useLayoutEffect(() => {
@@ -165,18 +202,25 @@ export default function Materials({ materials, checked, setChecked, catalogEnabl
       <p className="meta" id="supply-count">{materials.length
         ? groups.Gathered.length + ' of ' + materials.length + ' gathered' : 'No supplies listed.'}</p>
     </div>
-    <div id="materials">{Object.entries(groups).map(([group, items]) => !!items.length && <div className="supply-group" key={group}>
-      <h3>{group}</h3>
-      <ul className="supply-items">{items.map(item => <li key={item.id}>
-        <label className="supply-check">
-          <input type="checkbox" value={item.id} checked={group === 'Gathered'} onChange={event => {
+    <div id="materials">{visibleGroups.map(([group, items]) => <div className="supply-group" key={group}>
+      {(group !== 'Still needed' || visibleGroups.length > 1) && <h3>{group}</h3>}
+      <ul className="supply-items">{items.map(item => {
+        const query = materialQuery(item);
+        const gathered = group === 'Gathered';
+        const expanded = expandedId === item.id;
+        return <SupplyRow key={item.id} item={item} gathered={gathered} expanded={expanded}
+          result={results.get(query)} searching={queries.has(query)}
+          onToggle={() => {
+            if (!expanded && gathered) request(query);
+            setExpandedId(expanded ? null : item.id);
+          }}
+          onCheck={value => {
             focusId.current = item.id;
-            setChecked(item.id, event.target.checked);
-          }} />
-          <span>{item.name}<small>{[item.quantity, item.substitute_note].filter(Boolean).join(' · ')}</small></span>
-        </label>
-        {group === 'Still needed' && <MaterialShopping item={item} enabled={catalogEnabled} result={results.get(materialQuery(item))} />}
-      </li>)}</ul>
+            if (expanded) setExpandedId(null);
+            setChecked(item.id, value);
+          }}
+          onRetry={() => { request(query); retry(query); }} />;
+      })}</ul>
     </div>)}</div>
   </section>;
 }

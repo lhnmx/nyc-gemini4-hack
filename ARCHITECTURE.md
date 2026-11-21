@@ -2,9 +2,9 @@
 
 This document describes the hackathon design for **CraftPOV**. The diagrams include planned integrations.
 
-**What runs today.** The React workbench displays the written plan and materials while FastAPI coordinates rendering. Gemini Omni creates each shot using the preceding shot’s final frame for continuity. The prompt calls for hands and tool contact when the action requires them. Gemini TTS reads the narration, and FFmpeg assembles one chaptered film with timed captions. An optional illustrated mode animates three keyframes per step. Project state and job progress persist in SQLite.
+**What runs today.** The React workbench displays written steps and the workflow while FastAPI coordinates rendering. Each chapter can refer to a timestamped observation from the selected YouTube tutorial. Gemini Omni renders independent pieces in parallel. Connected actions can use the reviewed final frame of their physical predecessor. A vision reviewer checks the opening, contact and result before the next dependent shot. Gemini TTS reads the narration and FFmpeg assembles the film in chapter order with timed captions. Project state and job progress persist in SQLite.
 
-**Shopify and UCP.** The public `/ucp-agent-profile.json` advertises the upstream shopping capabilities. Checkout, desk-photo inventory and live camera coaching remain planned. The API preserves the existing cart rebuild acknowledgement.
+**Shopify and UCP.** The workbench searches Shopify’s UCP catalog for material options, prices and merchant links. The public `/ucp-agent-profile.json` advertises the upstream shopping capabilities. In-app checkout, desk-photo inventory and live camera coaching remain planned. The API preserves the existing cart rebuild acknowledgement.
 
 ---
 

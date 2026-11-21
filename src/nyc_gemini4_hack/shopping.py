@@ -181,7 +181,7 @@ def shopping_router(settings: Settings) -> APIRouter:
             async with asyncio.timeout(8.0), httpx.AsyncClient(timeout=None) as client:
                 products = await search_catalog(*config, query, client)
         except (httpx.HTTPError, TimeoutError, ValueError, KeyError, TypeError):
-            raise HTTPException(502, "The Shopify catalog is unavailable. Try searching Shop.") from None
+            raise HTTPException(502, "The Shopify catalog is unavailable. Try again.") from None
         response.headers["Cache-Control"] = "no-store"
         return {"products": products}
 

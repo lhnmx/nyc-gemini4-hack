@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 from google.genai import types
@@ -40,8 +39,7 @@ async def _generate_pov_frame(
     contents.append(prompt)
 
     model = gemini.settings.pov_image_model
-    response = await asyncio.to_thread(
-        gemini.client.models.generate_content,
+    response = await gemini.client.aio.models.generate_content(
         model=model,
         contents=contents,
         config=types.GenerateContentConfig(

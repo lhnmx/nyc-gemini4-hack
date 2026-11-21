@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from nyc_gemini4_hack import pipeline
 from nyc_gemini4_hack.config import Settings
-from nyc_gemini4_hack.models import BuildPlan, ProjectState, ProjectStatus
+from nyc_gemini4_hack.models import BuildPlan, ProjectState, ProjectStatus, ShotReview
 from nyc_gemini4_hack.media import composer
 
 
@@ -53,7 +53,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         async def motion(*, step, bible, out_dir, gemini, prev_step_end_frame, speech_seconds):
             self.references.append(prev_step_end_frame)
             video = out_dir / f"{step.step_number}-motion.mp4"
-            return pipeline.MotionShot(video, 24, out_dir / f"{step.step_number}-motion-end.jpg")
+            review = ShotReview(attempt=1, status="passed", model="fixture", reference_mode="text",
+                                render_seconds=1, review_seconds=0.1)
+            return pipeline.MotionShot(video, 24, out_dir / f"{step.step_number}-motion-end.jpg", (review,))
 
         async def voice(*, script, out_wav, gemini, prefer_gemini_audio, duration_seconds, on_voice_model):
             self.assertTrue(prefer_gemini_audio)
@@ -222,6 +224,36 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, ProjectStatus.PARTIAL)
         self.assertEqual([result.media[i].status for i in (1, 2, 3)], ["error", "ready", "ready"])
         self.assertEqual(self.references, [None, None])
+        self.stitch.assert_not_awaited()
+
+    async def test_visual_reviews_survive_reload_withheld_chapter_cannot_seed_another(self):
+        self.plan.steps[1].visual_parent = 0
+        self.plan.steps[2].visual_parent = 1
+        motion = self.motion.side_effect
+        references = {}
+        async def film(**args):
+            step = args["step"]
+            references[step.step_number] = args["prev_step_end_frame"]
+            shot = await motion(**args)
+            if step.step_number == 1:
+                rejected = shot.reviews[0].model_copy(update={"status": "rejected"})
+                raise pipeline.ShotRejected([rejected, rejected.model_copy(update={"attempt": 2})])
+            if step.step_number == 2:
+                unavailable = shot.reviews[0].model_copy(update={"status": "unavailable"})
+                return pipeline.MotionShot(shot.video, shot.frames, shot.end_frame, (unavailable,))
+            return shot
+
+        self.motion.side_effect = film
+        with self.assertLogs(pipeline.logger, level="ERROR"):
+            result = await self.run_project()
+        saved = ProjectState.model_validate_json(result.model_dump_json())
+        self.assertEqual(saved.status, ProjectStatus.PARTIAL)
+        self.assertEqual(references, {1: None, 2: None, 3: None})
+        self.assertEqual([r.status for r in saved.media[1].shot_reviews], ["rejected", "rejected"])
+        self.assertIn("withheld", saved.media[1].error)
+        self.assertIsNone(saved.media[1].video_url)
+        self.assertEqual(saved.media[2].shot_reviews[-1].status, "unavailable")
+        self.assertEqual(saved.media[2].status, "ready")
         self.stitch.assert_not_awaited()
 
     async def test_visual_request_limit_applies_to_independent_shots(self):

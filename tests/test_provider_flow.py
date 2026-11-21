@@ -15,7 +15,7 @@ from nyc_gemini4_hack import pipeline
 from nyc_gemini4_hack.config import Settings
 from nyc_gemini4_hack.gemini_client import Gemini4Client
 from nyc_gemini4_hack.models import ProjectState, ProjectStatus
-from tests.test_motion import bar_locations, moving_shot
+from tests.test_motion import bar_locations, moving_shot, sample_findings
 from tests.test_pipeline import paper_plan
 from tests.test_video import PNG_FRAMES, write_tone
 from tests.test_voice import wav_bytes
@@ -72,6 +72,13 @@ class ProviderFlowTests(unittest.IsolatedAsyncioTestCase):
                     "id": kind, "status": "completed", "steps": [{"type": "model_output", "content": [part]}],
                 })
             model = path.rsplit("/", 1)[1].split(":")[0]
+            if body.get("generationConfig", {}).get("responseSchema", {}).get("title") == "_Observations":
+                self.assertEqual(model, "research")
+                seen.append("review")
+                part = {"text": json.dumps(sample_findings())}
+                return httpx.Response(200, json={"candidates": [
+                    {"content": {"role": "model", "parts": [part]}, "finishReason": "STOP"}
+                ]})
             seen.append(model)
             if model == "illustrate":
                 part = {"inlineData": {"mimeType": "image/png", "data": base64.b64encode(next(images)).decode()}}
@@ -105,7 +112,7 @@ class ProviderFlowTests(unittest.IsolatedAsyncioTestCase):
         if illustrated:
             self.assertCountEqual(seen[3:], ["illustrate"] * 3 + ["audio"])
             return
-        self.assertCountEqual(seen[3:], ["video", "audio"] * 2)
+        self.assertCountEqual(seen[3:], ["video", "audio", "review"] * 2)
         self.assertEqual([a.duration_seconds for a in state.media.values()], [26/24, 1])
         self.assertEqual([a.chapter_start_seconds for a in state.media.values()], [0, 26/24])
         film = folder / state.full_video_url.removeprefix("/media/")

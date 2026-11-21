@@ -7,7 +7,7 @@ import unittest
 import wave
 from array import array
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import imageio_ffmpeg
 from google.genai import types
@@ -61,7 +61,7 @@ class VideoTests(unittest.TestCase):
     def test_three_phases_chain_actual_image_bytes_and_preserve_craft(self):
         client = Mock()
         client.settings.pov_image_model = 'test-image'
-        calls = client.client.models.generate_content
+        calls = client.client.aio.models.generate_content = AsyncMock()
         calls.side_effect = [types.GenerateContentResponse(candidates=[
             types.Candidate(),
             types.Candidate(content=types.Content(parts=[
@@ -96,12 +96,12 @@ class VideoTests(unittest.TestCase):
 
     def test_no_image_stops_at_setup(self):
         client = Mock()
-        client.client.models.generate_content.return_value = types.GenerateContentResponse(
+        client.client.aio.models.generate_content = AsyncMock(return_value=types.GenerateContentResponse(
             candidates=[types.Candidate()]
-        )
+        ))
         with self.assertRaisesRegex(RuntimeError, 'no final POV image'):
             asyncio.run(generate_step_pov_frames(self.step, self.bible, self.folder, client))
-        client.client.models.generate_content.assert_called_once()
+        client.client.aio.models.generate_content.assert_awaited_once()
         self.assertEqual(list(self.folder.iterdir()), [])
 
     def test_render_preserves_shot_order_audio_length_and_stitched_narration(self):

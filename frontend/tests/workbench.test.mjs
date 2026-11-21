@@ -301,7 +301,7 @@ test('shows the film surface before submission returns and preserves it as the w
     assert.equal(await page.getByRole('heading', { name: 'Fold a paper envelope' }).isVisible(), true);
   } finally { accept(); }
   await page.getByText('Your guide is queued').waitFor();
-  assert.equal(await page.locator('.progress li[data-state=active]').innerText(), 'Queue\nIn progress');
+  assert.equal(await page.locator('#generation-panel .graph-node.agent:visible').count(), 3);
   await capture(page, 'phone-queued');
 });
 
@@ -323,22 +323,23 @@ test('shows observed contributors, decisions, measured media progress and concur
     { gate_name: 'video_2_relevance', choice: 'REJECT', model_used: 'fallback-model', via_decisions_api: false },
   ];
   await emit(page, 'research_decisions', { decisions });
-  await page.locator('#generation-activity > summary').filter({ hasText: '2 decisions' }).waitFor();
+  const graph = page.locator('#generation-panel #workflow');
+  await graph.getByRole('button', { name: 'Show all 2 sources' }).click();
   await emit(page, 'status', { status: 'planning', message: 'Planning.' });
   await emit(page, 'activity', planning);
   await page.getByText('Planning your guide').waitFor();
-  await page.locator('#generation-activity > summary').click();
-  await page.getByText('Started · Planner · planner-model', { exact: true }).waitFor();
+  await graph.locator('[data-node=planning]').click();
+  const details = graph.getByRole('region', { name: 'Selected node details' });
+  await details.getByText('Planner · planner-model', { exact: true }).waitFor();
+  await details.getByText('In progress', { exact: true }).waitFor();
   const finishedPlan = { ...planning, state: 'completed', timestamp: '2026-11-21T14:30:16Z' };
   await emit(page, 'activity', finishedPlan);
-  await page.getByText('Completed · Planner · planner-model', { exact: true }).waitFor();
-  assert.equal(await page.locator('.activity-list li').count(), 2);
-  assert.equal(await page.locator('.activity-list time').last().getAttribute('datetime'), '2026-11-21T14:30:16.000Z');
-  await page.getByText('Research decisions (2)').click();
-  const researchHistory = page.locator('.decision-detail').filter({ hasText: 'Research decisions' });
-  await researchHistory.getByText('Decisions API · decision-model', { exact: true }).waitFor();
-  await researchHistory.getByText('Model decision · fallback-model', { exact: true }).waitFor();
-  await page.getByText('Research decisions (2)').click();
+  await details.getByText('Done', { exact: true }).waitFor();
+  assert.equal(await details.locator('time').getAttribute('datetime'), '2026-11-21T14:30:16.000Z');
+  await graph.locator('[data-node=review-video_1_relevance]').click();
+  await details.getByText('Decisions API · decision-model').waitFor();
+  await graph.locator('[data-node=review-video_2_relevance]').click();
+  await details.getByText('Structured fallback · fallback-model').waitFor();
   await emit(page, 'plan_ready', plan);
   const media_progress = { stage: 'footage', step_number: 1, step_count: 2, ready_count: 0, elapsed_seconds: 12 };
   await emit(page, 'status', { status: 'generating', message: 'Preparing the first chapter.', media_progress });
@@ -348,11 +349,12 @@ test('shows observed contributors, decisions, measured media progress and concur
   await emit(page, 'activity', voice);
   await page.getByText('Creating motion and narration').waitFor();
   await page.getByText('Media time 0:12').waitFor();
-  assert.equal(await page.locator('.progress.compact [data-state=active]').count(), 2);
+  await graph.locator('[data-node=motion]').click();
+  assert.equal(await details.locator('[data-operation-id]').count(), 2);
   await capture(page, 'desktop-activity');
   await emit(page, 'snapshot', { ...completed, full_video_url: null, status: 'generating', media: {},
     activity: [screening, finishedPlan, motion, voice], decisions_log: decisions, media_progress });
-  assert.equal(await page.locator('.activity-list li').count(), 4);
+  assert.equal(await details.locator('[data-operation-id]').count(), 2);
   const secondVoice = { ...voice, id: 'voice2', step_number: 2 };
   await emit(page, 'activity', secondVoice);
   assert.equal(await page.locator('#step-list button').nth(1).getAttribute('data-chapter-state'), 'queued');
@@ -360,7 +362,7 @@ test('shows observed contributors, decisions, measured media progress and concur
   // The last footage status is still present while narration and encoding continue.
   await emit(page, 'activity', { ...motion, state: 'completed' });
   await page.getByText('Recording narration', { exact: true }).waitFor();
-  assert.equal(await page.locator('.progress.compact [data-state=active]').count(), 1);
+  assert.equal(await details.locator('[data-operation-id]:visible').count(), 1);
   assert.equal(await page.locator('#step-list button').first().getAttribute('data-chapter-state'), 'waiting');
   await emit(page, 'activity', { ...voice, state: 'completed' });
   const assembly = stage('assembly1', 'Encode chapter', 'assembly', 'started', 'FFmpeg', null, '40', 1);
@@ -374,87 +376,162 @@ test('shows observed contributors, decisions, measured media progress and concur
   await page.getByText('Assembling the full film').waitFor();
   await page.getByText('2 of 2 chapters ready').waitFor();
   await emit(page, 'step_media_ready', { ...media[1], video_model: 'recorded-video-model', voice_model: 'Local speech' });
-  await page.getByText('Chapter production (1)').click();
+  await details.getByText('Chapter credits (1)').click();
   await page.getByText('Footage · recorded-video-model', { exact: true }).waitFor();
   await page.getByText('Narration · Local speech', { exact: true }).waitFor();
 });
 
-test('keeps source choices and live agent work in the same focused film panel across phases on a phone', async t => {
+test('connects each tutorial to its decision, preserves keyboard selection and reveals live agent work', async t => {
   const state = { project_id: 'glider', goal: 'Fold a long-distance paper glider', status: 'researching', media: {} };
   const { page } = await workbench(t, { state, width: 320 });
   await page.goto(origin + '/?project=glider');
-  const panel = page.locator('#generation-panel');
-  const feed = panel.getByRole('list', { name: 'Recent agent operations' });
-  const choices = panel.getByRole('list', { name: 'Tutorial choices' });
-  const source = 'A stable paper glider with symmetric wings';
-  const skipped = 'Paper airplane flight showcase';
+  const graph = page.getByRole('region', { name: 'Workflow', exact: true });
+  const details = graph.getByRole('region', { name: 'Selected node details' });
+  const node = id => graph.locator('[data-node="' + id + '"]');
+  const edge = (from, to) => graph.locator('path[data-from="' + from + '"][data-to="' + to + '"]');
   const search = { id: 'source-search', stage: 'research', label: 'Find tutorials', agent: 'YouTube Data API v3',
     state: 'started', detail: state.goal, timestamp: '2026-11-21T14:30:01Z' };
   await emit(page, 'activity', search);
-  await feed.getByText(state.goal).waitFor();
-  await feed.focus();
-  await feed.evaluate(node => {
-    window.firstFeed = node;
-    window.firstPanel = node.closest('#generation-panel');
-    window.firstStream = window.streams.at(-1);
-  });
-  await emit(page, 'activity', { ...search, state: 'completed', detail: source + ' · ' + skipped });
+  assert.equal(await graph.evaluate(el => el.parentElement.id === 'generation-panel'), true);
+  await node('research').click();
+  await details.getByText(state.goal, { exact: true }).waitFor();
+  await node('research').focus();
+  await graph.evaluate(el => { window.firstGraph = el; window.firstStream = window.streams[0]; });
   const decisions = [
-    { gate_name: 'video_1_relevance', source_title: source, choice: 'KEEP_TUTORIAL', model_used: 'observed-selector',
-      via_decisions_api: true, rationale: 'Shows the center crease and both wing folds.' },
-    { gate_name: 'video_2_relevance', source_title: skipped, choice: 'SKIP_FILLER', model_used: 'observed-fallback',
-      via_decisions_api: false, rationale: 'Shows the flight without demonstrating the folds.' },
+    { gate_name: 'video_1_relevance', source_title: 'Paper airplane flight showcase', source_url: 'https://youtu.be/ccDD11_aaBB',
+      choice: 'SKIP_FILLER', confidence: .87, model_used: 'observed-fallback', via_decisions_api: false,
+      rationale: 'Shows the flight without demonstrating the folds.' },
+    { gate_name: 'video_2_relevance', source_title: 'A stable paper glider with symmetric wings',
+      choice: 'KEEP_TUTORIAL', confidence: .95, model_used: 'observed-selector', via_decisions_api: true,
+      rationale: 'Shows the center crease and both wing folds.' },
   ];
+  const candidates = decisions.map(d => ({ gate_name: d.gate_name, title: d.source_title, url: d.source_url || plan.source_youtube_urls[1] }));
+  await emit(page, 'activity', { ...search, state: 'completed', sources: candidates });
+  await node('review-video_1_relevance').getByText('Found', { exact: true }).waitFor();
+  assert.equal(await node('research').evaluate(el => el === document.activeElement), true);
+  await node('review-video_1_relevance').focus();
+  await node('review-video_1_relevance').evaluate(el => { window.pendingReview = el; });
+  const screening = { ...search, id: 'source-selection', label: 'Select tutorials', agent: 'Research agent', sources: candidates };
+  await emit(page, 'activity', screening);
+  await node('review-video_1_relevance').getByText('In review', { exact: true }).waitFor();
+  await emit(page, 'activity', { ...screening, state: 'completed' });
   await emit(page, 'research_decisions', { decisions });
-  const kept = choices.getByRole('listitem').filter({ hasText: source });
-  const rejected = choices.getByRole('listitem').filter({ hasText: skipped });
-  await kept.getByText('Keep tutorial').waitFor();
-  await kept.getByText(decisions[0].rationale).waitFor();
-  await kept.getByText('Decisions API · observed-selector').waitFor();
-  await rejected.getByText('Skip tutorial').waitFor();
-  await rejected.getByText('Model decision · observed-fallback').waitFor();
-  assert.equal(await page.locator('#generation-activity').getAttribute('open'), null);
-  const analysis = { ...search, id: 'analyze-source', label: 'Analyze tutorial footage', agent: 'Research agent',
-    model: 'observed-video-analyst', detail: source, timestamp: '2026-11-21T14:30:05Z' };
+  await node('review-video_1_relevance').getByText('Skipped', { exact: true }).waitFor();
+  assert.equal(await node('review-video_1_relevance').evaluate(el => el === window.pendingReview && el === document.activeElement), true);
+  assert.equal(await graph.locator('.graph-node.source').count(), 1);
+  await graph.getByRole('button', { name: 'Show all 2 sources' }).click();
+  await node('research').focus();
+  for (const decision of decisions) {
+    const source = 'source-' + decision.gate_name, review = 'review-' + decision.gate_name;
+    assert.equal(await edge('research', source).count(), 1);
+    const path = edge(source, review);
+    assert.ok(await path.evaluate(el => el.getTotalLength() > 4 && !!el.getAttribute('marker-end')));
+    assert.equal(await graph.locator('path[data-from="' + source + '"]').count(), 1);
+  }
+  assert.equal(await node('research').evaluate(el => el === document.activeElement), true);
+  await node('review-video_1_relevance').focus();
+  await page.keyboard.press('Enter');
+  await details.getByText('Skipped', { exact: true }).waitFor();
+  await details.getByText(decisions[0].rationale).waitFor();
+  await details.getByText('Structured fallback · observed-fallback').waitFor();
+  assert.equal(await details.getByRole('link', { name: 'Watch on YouTube' }).getAttribute('href'),
+    'https://www.youtube.com/watch?v=ccDD11_aaBB');
+  const analysis = { ...search, id: 'analyze-T5I6Jez-pNI', label: 'Analyze tutorial footage', state: 'completed',
+    agent: 'Research agent', model: 'observed-video-analyst', detail: decisions[1].source_title + ' · 4 hands-on segments.' };
   await emit(page, 'activity', analysis);
-  const analyzeRow = feed.locator('[data-operation-id="analyze-source"]');
-  await analyzeRow.getByText('In progress').waitFor();
-  await analyzeRow.getByText(source).waitFor();
-  await analyzeRow.getByText('Research agent · observed-video-analyst').waitFor();
-  await capture(page, 'phone-agent-research');
-  const observed = { ...analysis, state: 'completed', detail: source + ' · 0:21 Align the paper corners.' };
-  await emit(page, 'activity', observed);
-  await emit(page, 'status', { status: 'planning', message: 'Organizing the materials and working out each step.' });
-  const planning = { id: 'physical-planning', stage: 'planning', label: 'Check physical continuity', state: 'started',
-    agent: 'Physical planner', model: 'observed-planner', detail: steps.map(step => step.title).join(' · '),
-    timestamp: '2026-11-21T14:30:14Z' };
+  await emit(page, 'status', { status: 'planning', message: 'Organizing the materials.' });
+  const planning = { id: 'physical-planning', stage: 'planning', label: 'Check physical continuity', state: 'completed',
+    agent: 'Physical planner', model: 'observed-planner', detail: 'Checked physical dependencies.', timestamp: '2026-11-21T14:30:14Z' };
   await emit(page, 'activity', planning);
-  const planner = feed.locator('[data-operation-id="physical-planning"]');
-  await planner.getByText(planning.detail).waitFor();
-  await planner.getByText('Physical planner · observed-planner').waitFor();
-  await analyzeRow.getByText(observed.detail).waitFor();
-  await emit(page, 'activity', { ...planning, state: 'completed' });
-  await emit(page, 'plan_ready', plan);
+  const planned = { ...plan, steps: [{ ...steps[0], source_segments: [
+    { segment_id: 'fold', source_title: decisions[1].source_title, source_url: plan.source_youtube_urls[1], start_seconds: 21, end_seconds: 29 },
+  ] }, steps[1]] };
+  await emit(page, 'plan_ready', planned);
+  assert.equal(await node('review-video_1_relevance').evaluate(el => el === document.activeElement && el.ariaPressed === 'true'), true);
+  assert.equal(await edge('review-video_1_relevance', 'planning').count(), 0);
+  assert.equal(await edge('review-video_2_relevance', 'planning').getAttribute('data-pending'), 'false');
+  await node('source-video_2_relevance').click();
+  await details.getByText(decisions[1].rationale).waitFor();
+  await details.getByText('Cited in plan').waitFor();
+  assert.equal(await details.getByRole('link', { name: 'Watch on YouTube' }).getAttribute('href'), plan.source_youtube_urls[1]);
+  await node('planning').click();
+  await details.getByText('Physical planner · ' + planning.model, { exact: true }).waitFor();
   await emit(page, 'status', { status: 'generating', message: 'Preparing the chapter videos.' });
   const motion = { id: 'motion-1', stage: 'motion', label: 'Generate motion', agent: 'Motion generator', state: 'started',
     model: 'observed-film-model', step_number: 1, timestamp: '2026-11-21T14:30:30Z' };
   await emit(page, 'activity', motion);
-  const render = feed.locator('[data-operation-id="motion-1"]');
-  await render.getByText('Step 1 · ' + steps[0].title).waitFor();
-  await render.getByText('Motion generator · observed-film-model').waitFor();
+  await node('motion').click();
+  await details.getByText('Step 1 · ' + steps[0].title).waitFor();
+  await details.getByText(motion.model).waitFor();
+  assert.equal(await details.getByRole('link', { name: /0:21/ }).getAttribute('href'), plan.source_youtube_urls[1] + '&t=21s');
   await page.evaluate(() => window.streams.at(-1).onerror(new Event('error')));
-  await render.getByText('Last reported active').waitFor();
-  await panel.getByText('Last report · Creating motion').waitFor();
-  await emit(page, 'snapshot', { ...state, status: 'generating', plan,
-    activity: [observed, { ...planning, state: 'completed' }, motion], decisions_log: decisions });
-  await render.getByText('In progress').waitFor();
-  assert.equal(await choices.getByRole('listitem').count(), 2);
-  assert.equal(await feed.evaluate(node => node === window.firstFeed && node.closest('#generation-panel') === window.firstPanel
-    && node === document.activeElement && window.streams.length === 1 && window.streams[0] === window.firstStream), true);
+  await node('motion').getByText('Last reported active').waitFor();
+  await emit(page, 'snapshot', { ...state, status: 'generating', plan: planned, activity: [analysis, planning, motion], decisions_log: decisions });
+  await node('motion').getByText('In progress').waitFor();
+  assert.equal(await graph.evaluate(el => el === window.firstGraph && window.streams.length === 1
+    && window.streams[0] === window.firstStream), true);
+  await node('motion').click();
+  await graph.getByRole('button', { name: 'Show one source' }).click();
+  await page.getByText('Creating motion', { exact: true }).waitFor();
+  await page.evaluate(() => window.scrollTo(0, 0));
+  assert.equal(await page.locator('#step-title').evaluate(el => el.getBoundingClientRect().bottom < innerHeight), true);
+  await capture(page, 'phone-inline-agent-film');
+  await page.setViewportSize({ width: 1440, height: 850 });
+  await capture(page, 'desktop-inline-agent-film');
+  await page.setViewportSize({ width: 320, height: 850 });
+  await graph.getByRole('button', { name: 'Show all 2 sources' }).click();
+  await emit(page, 'status', { status: 'partial', message: 'The guide finished with a missing chapter.' });
+  await node('motion').getByText('Interrupted').waitFor();
+  assert.equal(await edge('planning', 'motion').count(), 1);
+  assert.equal(await graph.locator('[data-node]').count(), 7);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-  assert.equal(await page.locator('.progress.compact li > span:nth-child(2)').evaluateAll(labels =>
-    labels.every(label => label.offsetHeight <= parseFloat(getComputedStyle(label).lineHeight) + 1)), true);
-  await capture(page, 'phone-agent-generating');
+  await graph.scrollIntoViewIfNeeded();
+  await capture(page, 'phone-agent-graph');
+  await page.setViewportSize({ width: 1440, height: 850 });
+  const research = await node('research').boundingBox(), source = await node('source-video_1_relevance').boundingBox();
+  assert.ok(source.x > research.x + research.width);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await graph.scrollIntoViewIfNeeded();
+  await capture(page, 'desktop-agent-graph');
+});
+
+test('opens the completed example graph from its film and resolves only evidenced legacy source links', async t => {
+  const { page } = await workbench(t, { width: 1280 });
+  const url = 'https://www.youtube.com/watch?v=T5I6Jez-pNI';
+  const decisions = [
+    { gate_name: 'video_1_relevance', source_title: 'Another fold', choice: 'KEEP_TUTORIAL', rationale: 'Shows a different fold.' },
+    { gate_name: 'tutorial_T5I6Jez-pNI', source_title: 'The cited fold', choice: 'KEEP_TUTORIAL', confidence: .92,
+      model_used: 'gemini-decision-1', via_decisions_api: true, rationale: 'Decisions API probabilities: KEEP_TUTORIAL=0.92, SKIP_FILLER=0.08' },
+    { gate_name: 'video_3_relevance', choice: 'SKIP_FILLER', rationale: 'No folding steps.' },
+  ];
+  await page.route('**/static/example/project.json', route => route.fulfill({ json: {
+    ...sample, plan: { ...sample.plan, source_youtube_urls: [url] }, decisions_log: decisions, activity: [],
+  } }));
+  await page.goto(origin);
+  await page.waitForFunction(() => document.querySelector('#video')?.readyState >= 1);
+  await page.locator('#video').evaluate(video => { window.originalFilm = video; });
+  assert.equal(await page.locator('.graph-disclosure').evaluate(el => el.open), false);
+  await page.locator('.graph-disclosure > summary').click();
+  const graph = page.getByRole('region', { name: 'Workflow', exact: true });
+  const details = graph.getByRole('region', { name: 'Selected node details' });
+  await graph.locator('[data-node=source-tutorial_T5I6Jez-pNI]').click();
+  await details.getByRole('heading', { name: 'The cited fold' }).waitFor();
+  assert.equal(await details.getByRole('link', { name: 'Watch on YouTube' }).getAttribute('href'), url);
+  await details.getByText('92% confidence').waitFor();
+  await details.getByText('The selector scored this source 92% for hands-on instruction and 8% for filler.').waitFor();
+  await graph.getByRole('button', { name: 'Show all 3 sources' }).click();
+  await graph.locator('[data-node=source-video_1_relevance]').click();
+  const search = details.getByRole('link', { name: 'Search YouTube for this title' });
+  assert.equal(new URL(await search.getAttribute('href')).searchParams.get('search_query'), 'Another fold');
+  assert.equal(await graph.locator('path[data-from=review-video_1_relevance][data-to=planning]').count(), 0);
+  await graph.locator('[data-node=review-video_3_relevance]').click();
+  assert.equal(await details.getByRole('link').count(), 0);
+  assert.equal(await page.locator('#video').evaluate(video => window.originalFilm === video), true);
+  for (const fragment of ['#workflow', '#agent-graph']) {
+    await page.goto(origin + '/' + fragment);
+    await graph.locator('[data-node=research]').waitFor();
+    await page.waitForFunction(() => scrollY > 0 && document.querySelector('#workflow').getBoundingClientRect().top < innerHeight / 2);
+  }
 });
 
 test('chapter menus track concurrent renders and play an out-of-order result until the full film takes over', async t => {
@@ -496,6 +573,10 @@ test('chapter menus track concurrent renders and play an out-of-order result unt
   assert.equal(await page.locator('#chapter-video').getAttribute('src'), later.video_url);
   assert.equal(await page.locator('#chapter-video track').getAttribute('src'), later.captions_url);
   assert.equal(await outline.nth(0).getAttribute('data-chapter-state'), 'rendering');
+  assert.equal(await page.locator('.graph-disclosure').evaluate(el => el.open), false);
+  await page.locator('#chapter-video').evaluate(el => { window.previewPlayer = el; });
+  await page.locator('.graph-disclosure > summary').click();
+  assert.equal(await page.locator('#chapter-video').evaluate(el => el === window.previewPlayer && !el.paused), true);
   await page.getByRole('button', { name: 'Return to progress' }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('.mobile-picker > summary').click();

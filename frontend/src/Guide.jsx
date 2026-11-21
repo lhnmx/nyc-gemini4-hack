@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { readSelection, timeLabel } from './project.js';
+import { chapterSourceLinks, readSelection, timeLabel } from './project.js';
 import Materials from './Materials.jsx';
 
 export function useSelection(projectId, stepCount) {
@@ -87,6 +87,7 @@ function StepNotes({ step }) {
   const state = step.physical_state || {};
   const cues = state.verification_cues || [];
   const check = cues[0] || state.end_state;
+  const sourceLinks = chapterSourceLinks(step.source_segments);
   const groups = [
     ['Starting position', [state.start_state]],
     ['Hand movement', [state.hand_kinematics]],
@@ -102,6 +103,16 @@ function StepNotes({ step }) {
           <h3>{label}</h3>
           {lines.length === 1 ? <p>{lines[0]}</p> : <ul>{lines.map((line, i) => <li key={i}>{line}</li>)}</ul>}
         </section>)}</div>
+      </details>}
+      {sourceLinks.length > 0 && <details className="disclosure">
+        <summary>Source footage</summary>
+        <ul className="activity-list">{sourceLinks.map(segment => <li key={segment.segment_id}>
+          <a className="text-link" href={segment.href} target="_blank" rel="noopener noreferrer">
+            {segment.source_title || 'YouTube tutorial'} · {timeLabel(segment.start_seconds)}–{timeLabel(segment.end_seconds)}
+            {' '}<span aria-hidden="true">↗</span>
+          </a>
+          <p>{segment.hand_action}</p>
+        </li>)}</ul>
       </details>}
       {step.narration_script && <details className="disclosure" id="transcript">
         <summary>Narration transcript</summary><p>{step.narration_script}</p>
