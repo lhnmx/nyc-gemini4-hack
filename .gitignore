@@ -1,0 +1,27 @@
+# Environment variables (never commit real secrets)
+.env
+.env.local
+.env.*.local
+
+# Python / uv
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Generated media & local runtime data
+data/
+outputs/
+*.mp4
+*.wav
+*.mp3
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
