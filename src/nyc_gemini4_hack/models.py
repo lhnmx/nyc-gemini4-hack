@@ -247,3 +247,27 @@ class ShopifyCartLineRequest(BaseModel):
 
 class ShopifyCartRequest(BaseModel):
     items: list[ShopifyCartLineRequest] = Field(..., min_length=1)
+
+
+class CoachSessionRequest(BaseModel):
+    current_step: int = Field(default=1, ge=1)
+    plan: BuildPlan | None = None
+
+
+class CoachSessionResponse(BaseModel):
+    ws_url: str
+    model: str
+    voice: str
+    system_instruction: str
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    initial_step: int = Field(default=1, ge=1)
+
+
+class CoachInspectResponse(BaseModel):
+    step_number: int = Field(ge=1)
+    verdict: Literal["PASS", "ADJUST", "REDO", "UNCLEAR"]
+    detected_step_number: int = Field(ge=1)
+    what_i_see: str
+    mistakes: list[str] = Field(default_factory=list)
+    fix: str = ""
+    next_action: str = ""

@@ -253,3 +253,17 @@ test('plays the real bundled film and captions, seeks chapters, follows playback
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   assert.equal(await video.evaluate(node => node.getBoundingClientRect().bottom <= innerHeight), true);
 });
+
+test('opens the dedicated Live Build Coach screen from the guide and returns cleanly', async t => {
+  const { page } = await workbench(t);
+  await page.goto(origin + '/?project=glider');
+  await page.getByRole('heading', { name: plan.project_title }).waitFor();
+  await page.getByRole('button', { name: "Let's build now" }).click();
+  await page.getByRole('heading', { name: plan.project_title }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Start live coach' }).isEnabled(), true);
+  assert.equal(await page.getByText(steps[0].title).first().isVisible(), true);
+  await page.getByRole('button', { name: 'Next step' }).click();
+  assert.equal(await page.getByRole('heading', { name: steps[1].title }).isVisible(), true);
+  await page.getByRole('button', { name: '← Back to guide' }).click();
+  await page.getByRole('heading', { name: steps[1].title }).waitFor();
+});

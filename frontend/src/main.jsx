@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import BuildCoach from './BuildCoach.jsx';
 import Builder from './Builder.jsx';
 import { Guide, GuideMeta, Sidebar, useSelection } from './Guide.jsx';
 import { chapterStarts, guideStatus, mediaUrl, useHealth, useProject, youtubeLinks } from './project.js';
@@ -8,6 +9,7 @@ import './workbench.css';
 function Workbench({ route, onCreated }) {
   const { project, error, connection } = useProject(route);
   const [builder, setBuilder] = useState(null);
+  const [building, setBuilding] = useState(false);
   const [failedFilm, setFailedFilm] = useState(null);
   const health = useHealth(Boolean(builder));
   const video = useRef(null);
@@ -49,6 +51,23 @@ function Workbench({ route, onCreated }) {
     video.current?.pause();
     setBuilder({ initial: edit ? project : null });
   }
+  function openBuildCoach() {
+    video.current?.pause();
+    setBuilding(true);
+  }
+  if (building && plan && steps.length > 0) {
+    return <BuildCoach
+      project={project}
+      plan={plan}
+      media={project?.media}
+      assetUrl={asset}
+      example={example}
+      stepIndex={selection.index}
+      onSelectStep={index => selection.setIndex(index)}
+      onBack={() => setBuilding(false)}
+      liveCoachReady={health.liveCoachReady}
+    />;
+  }
   return <>
     <a className="skip-link" href="#guide-title">Skip to guide</a>
     <div className="shell">
@@ -59,7 +78,12 @@ function Workbench({ route, onCreated }) {
           <div className="breadcrumb"><span>Workbench</span><span className="crumb-slash" aria-hidden="true">/</span>
             <span id="guide-kind">{example ? 'Example guide' : 'Your guide'}</span>
           </div>
-          <button className="compact-new" type="button" onClick={() => newGuide()}><span aria-hidden="true">＋</span> New guide</button>
+          <div className="topbar-actions">
+            {steps.length > 0 && <button className="build-now" id="build-now" type="button" onClick={openBuildCoach}>
+              Let's build now
+            </button>}
+            <button className="compact-new" type="button" onClick={() => newGuide()}><span aria-hidden="true">＋</span> New guide</button>
+          </div>
         </header>
         <div className="document">
           <h1 id="guide-title" ref={titleRef} tabIndex="-1">{title}</h1>

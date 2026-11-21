@@ -3,17 +3,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 import httpx
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi import Path as ApiPath
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from vercel import blob
 
 from nyc_gemini4_hack import blob_media
+from nyc_gemini4_hack.agents.coach import create_live_coach_session, inspect_workpiece_frame
 from nyc_gemini4_hack.agents.commerce import (
     build_shopping_cart_proposal,
     create_mock_store_cart,
@@ -23,6 +26,10 @@ from nyc_gemini4_hack.config import Settings, get_settings
 from nyc_gemini4_hack.intake import creation_response, prepare_project
 from nyc_gemini4_hack.job_store import JobStore, JobStoreError, open_job_store
 from nyc_gemini4_hack.models import (
+    BuildPlan,
+    CoachInspectResponse,
+    CoachSessionRequest,
+    CoachSessionResponse,
     MaterialStatus,
     ProjectState,
     ProjectStatus,
@@ -32,7 +39,23 @@ from nyc_gemini4_hack.models import (
     ShoppingCartProposal,
 )
 
+logger = logging.getLogger(__name__)
 ProjectId = Annotated[str, ApiPath(pattern=r"^[a-zA-Z0-9_-]+$", max_length=96)]
+
+
+def _load_example_plan() -> BuildPlan | None:
+    package_root = Path(__file__).resolve().parent
+    candidates = [
+        package_root / "web" / "example" / "project.json",
+        package_root.parent.parent / "frontend" / "dist" / "static" / "example" / "project.json",
+        package_root.parent.parent / "frontend" / "public" / "static" / "example" / "project.json",
+    ]
+    for path in candidates:
+        if path.is_file():
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if raw.get("plan"):
+                return BuildPlan.model_validate(raw["plan"])
+    return None
 
 
 def store_connection(request: Request) -> JobStore:
@@ -215,6 +238,80 @@ def create_app(*, hosted: bool = False, settings: Settings | None = None) -> Fas
             return await create_mock_store_cart(body.items)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/projects/{project_id}/coach/session", response_model=CoachSessionResponse)
+    async def coach_session(
+        request: Request,
+        project_id: ProjectId,
+        body: CoachSessionRequest = Body(default_factory=CoachSessionRequest),
+    ) -> CoachSessionResponse:
+        if not settings.gemini_api_key.strip():
+            raise HTTPException(503, "Live coach requires GEMINI_API_KEY on the server.")
+        plan: BuildPlan | None = None
+        if project_id == "example":
+            plan = body.plan or _load_example_plan()
+            if plan is None:
+                raise HTTPException(404, "Example guide plan could not be loaded.")
+        else:
+            store = store_connection(request)
+            project, _ = await load_project(project_id, store)
+            if project.plan is None:
+                raise HTTPException(400, "Project plan is not ready yet.")
+            plan = project.plan
+        try:
+            return await create_live_coach_session(plan, settings, current_step=body.current_step)
+        except Exception as exc:
+            logger.exception("Failed to create live coach session for %s", project_id)
+            raise HTTPException(502, "Could not start live coach session.") from exc
+
+    @app.post("/api/projects/{project_id}/coach/inspect", response_model=CoachInspectResponse)
+    async def coach_inspect(
+        request: Request,
+        project_id: ProjectId,
+        step_number: int = Form(default=1, ge=1),
+        user_question: str = Form(default=""),
+        plan_json: str = Form(default=""),
+        frame: UploadFile = File(...),
+        reference_frame: UploadFile | None = File(default=None),
+    ) -> CoachInspectResponse:
+        if not settings.gemini_api_key.strip():
+            raise HTTPException(503, "Live coach inspection requires GEMINI_API_KEY on the server.")
+        plan: BuildPlan | None = None
+        if project_id == "example":
+            if plan_json.strip():
+                plan = BuildPlan.model_validate_json(plan_json)
+            else:
+                plan = _load_example_plan()
+            if plan is None:
+                raise HTTPException(404, "Example guide plan could not be loaded.")
+        else:
+            store = store_connection(request)
+            project, _ = await load_project(project_id, store)
+            if project.plan is None:
+                raise HTTPException(400, "Project plan is not ready yet.")
+            plan = project.plan
+
+        frame_bytes = await frame.read()
+        if not frame_bytes:
+            raise HTTPException(400, "Webcam frame is empty.")
+        frame_mime = frame.content_type or "image/jpeg"
+        ref_bytes = await reference_frame.read() if reference_frame is not None else None
+        ref_mime = (reference_frame.content_type or "image/jpeg") if reference_frame is not None else "image/jpeg"
+
+        try:
+            return await inspect_workpiece_frame(
+                plan=plan,
+                step_number=step_number,
+                frame_bytes=frame_bytes,
+                frame_mime=frame_mime,
+                settings=settings,
+                reference_bytes=ref_bytes or None,
+                reference_mime=ref_mime,
+                user_question=user_question,
+            )
+        except Exception as exc:
+            logger.exception("Failed to inspect workpiece for %s", project_id)
+            raise HTTPException(502, "Could not inspect the webcam frame.") from exc
 
     @app.post("/api/projects/{project_id}/steps/{step_number}/checkin")
     async def step_checkin(row: Loaded, step_number: int, frame: UploadFile = File(...)):

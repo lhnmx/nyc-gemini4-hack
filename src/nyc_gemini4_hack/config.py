@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     pov_video_model: str = Field(default="gemini-omni-1.2-flash")
     pov_image_model: str = Field(default="gemini-3.1-flash-image")
     audio_model: str = Field(default="gemini-3.8-flash-tts")
+    live_coach_model: str = Field(default="gemini-3.8-live")
+    live_coach_api_version: str = Field(default="v1alpha")
     veo_model: str = Field(default="veo-3.0-generate-preview")
     imagen_model: str = Field(default="imagen-3.0-generate-002")
     tts_voice: str = Field(default="Aoede")
@@ -79,7 +81,7 @@ class Settings(BaseSettings):
             "capabilities": {
                 "media_mode": self.pov_media_mode,
                 "commerce": bool(self.shopify_mcp_url.strip()),
-                "live_coach": False,
+                "live_coach": bool(self.gemini_api_key.strip()),
                 "desk_inventory": False,
             },
             "models": {
@@ -88,6 +90,7 @@ class Settings(BaseSettings):
                 "neon": self.gemini_model_neon,
                 "hydrogen": self.gemini_model_hydrogen,
                 "decisions": self.gemini_decisions_model,
+                "live_coach": self.live_coach_model,
                 "video": self.pov_video_model,
                 "image": self.pov_image_model,
                 "audio": self.audio_model,

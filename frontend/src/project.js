@@ -46,7 +46,8 @@ export function useHealth(refresh) {
           ? 'Guide generation needs the ' + missing.join(' and ') + ' API ' + (missing.length === 1 ? 'key' : 'keys') + ' configured on the server.'
           : 'The server has API keys for Gemini and YouTube.';
         const detail = data.generation_message || (blocked && !missing.length ? 'Guide generation is unavailable on this server.' : keyStatus);
-        setHealth({ label: blocked ? 'Setup needed' : 'Services ready', detail, blocked });
+        const liveCoachReady = Boolean(data.capabilities?.live_coach ?? data.gemini_configured);
+        setHealth({ label: blocked ? 'Setup needed' : 'Services ready', detail, blocked, liveCoachReady });
       } catch {
         if (!request.signal.aborted) setHealth({ label: 'Server unavailable', detail: 'The guide generation server could not be reached.', blocked: true });
       }
