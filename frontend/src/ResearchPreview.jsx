@@ -87,8 +87,8 @@ export default function ResearchPreview({ sources, project, connection, recorded
         </select>
       </label>}
     </header>
-    <div className="research-card" data-playing={playerOpen}>
-      {!playerOpen && <Thumbnail url={links.href} duration={source.duration_seconds} />}
+    <div className="research-card">
+      {!recorded && !playerOpen && <Thumbnail url={links.href} duration={source.duration_seconds} />}
       <div className="research-info">
         <p className="research-state" data-active={source.analysisState === 'started' || (!source.decision && source.reviewState === 'started')}
           role="status">{state}</p>

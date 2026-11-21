@@ -483,9 +483,13 @@ test('connects each tutorial to its decision, preserves keyboard selection and r
   await node('motion').click();
   await graph.getByRole('button', { name: 'Show one source' }).click();
   await page.getByText('Creating motion', { exact: true }).waitFor();
-  await page.evaluate(() => window.scrollTo(0, 0));
-  assert.equal(await page.locator('#step-title').evaluate(el => el.getBoundingClientRect().bottom < innerHeight), true);
+  await graph.getByRole('heading', { name: 'Recorded research' }).waitFor();
   await capture(page, 'phone-inline-agent-film');
+  const workflowSummary = graph.locator('.graph-disclosure > summary');
+  await workflowSummary.click();
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForFunction(() => document.querySelector('#step-title').getBoundingClientRect().bottom < innerHeight);
+  await workflowSummary.click();
   await page.setViewportSize({ width: 1440, height: 850 });
   await capture(page, 'desktop-inline-agent-film');
   await page.setViewportSize({ width: 320, height: 850 });
@@ -652,8 +656,9 @@ test('chapter menus track concurrent renders and play an out-of-order result unt
   assert.equal(await page.locator('.graph-disclosure').evaluate(el => el.open), false);
   await page.locator('#chapter-video').evaluate(el => { window.previewPlayer = el; });
   await page.locator('.graph-disclosure > summary').click();
+  await page.locator('.workflow-progress').getByText('Creating chapter footage', { exact: true }).waitFor();
   assert.equal(await page.locator('#chapter-video').evaluate(el => el === window.previewPlayer && !el.paused), true);
-  await page.getByRole('button', { name: 'Return to progress' }).click();
+  assert.equal(await page.getByRole('button', { name: 'Return to progress' }).count(), 0);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('.mobile-picker > summary').click();
   const mobile = page.locator('#mobile-step-list button');

@@ -211,13 +211,19 @@ test('offers a direct link when the API script is blocked or a frame never respo
   }
 });
 
-test('replays a verified chapter interval from the bundled example without losing the guide film', async t => {
+test('opens recorded research from Workflow and replays a verified interval without replacing the guide film', async t => {
   const { page } = await openResearch(t, { width: 320, example: true });
   await page.waitForFunction(() => document.querySelector('#video')?.readyState >= 1);
   await page.locator('#video').evaluate(async video => { window.guideFilm = video; video.muted = true; await video.play(); });
-  await page.getByRole('button', { name: 'Replay research' }).click();
+  const workflow = page.getByRole('region', { name: 'Workflow', exact: true });
+  const summary = workflow.locator('.graph-disclosure > summary');
+  assert.equal(await page.getByRole('button', { name: 'Replay research' }).count(), 0);
   const replay = page.getByRole('region', { name: 'Research replay' });
+  assert.equal(await replay.count(), 0);
+  await summary.press('Enter');
   await replay.getByText('Analysis complete').waitFor();
+  await workflow.locator('.graph-board').waitFor();
+  assert.equal(await page.locator('#video').evaluate(el => el === window.guideFilm && !el.paused), true);
   assert.equal(await replay.locator('iframe').count(), 0);
   await replay.getByRole('button', { name: 'Loop Centerline valley fold and unfold, 0:06–0:14' }).click();
   await page.waitForFunction(() => window.youtubePlayers?.[0]?.commands.includes('play'));
@@ -231,8 +237,8 @@ test('replays a verified chapter interval from the bundled example without losin
     return player.commands.at(-1);
   }), { load: { videoId: 'gZQI1Z_viNg', startSeconds: 6, endSeconds: 14 } });
   await checkFitsScreen(replay.locator('iframe'));
-  await page.getByRole('button', { name: 'Close replay' }).click();
-  await replay.waitFor({ state: 'detached' });
-  assert.equal(await page.locator('iframe').count(), 0);
+  await summary.click();
+  await workflow.locator('iframe').waitFor({ state: 'detached' });
+  assert.equal(await replay.isVisible(), false);
   assert.ok(await page.locator('#video').evaluate(el => el === window.guideFilm));
 });

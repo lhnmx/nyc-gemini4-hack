@@ -269,14 +269,13 @@ function StageDetail({ stage, project, connection }) {
   </>;
 }
 
-export default function AgentGraph({ project, connection, playback, sources, playing, togglePreview, stopPreview, replayPreview, progress }) {
+export default function AgentGraph({ project, connection, playback, sources, playing, togglePreview, stopPreview, recordedResearch, progress }) {
   const section = useRef(null);
   const disclosure = useRef(null);
   const [picked, setPicked] = useState(null);
   const [allSources, setAllSources] = useState(false);
   const [focusedBranch, setFocusedBranch] = useState(null);
   const [expanded, setExpanded] = useState(!playback);
-  const [replay, setReplay] = useState(false);
   useLayoutEffect(() => {
     const control = disclosure.current;
     const reveal = () => {
@@ -305,32 +304,22 @@ export default function AgentGraph({ project, connection, playback, sources, pla
     stopPreview('graph');
     setPicked(previous => previous === id ? null : id);
   }
-  function toggleReplay() {
-    if (replay) stopPreview('research');
-    else {
-      disclosure.current.open = true;
-      setExpanded(true);
-    }
-    setReplay(!replay);
-  }
   return <section id="workflow" ref={section} className="agent-graph" aria-label="Workflow" tabIndex="-1"
     onFocus={event => setFocusedBranch(event.target.closest('[data-branch]')?.dataset.branch || null)}
     onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusedBranch(null); }}>
-    <div className="graph-shell" data-replay={Boolean(replayPreview)}>
     <details ref={disclosure} className="graph-disclosure" onToggle={event => {
       if (event.target !== disclosure.current) return;
       setExpanded(disclosure.current.open);
       if (!disclosure.current.open) {
-        setReplay(false);
         stopPreview('graph');
-        if (replayPreview) stopPreview('research');
+        if (recordedResearch) stopPreview('research');
       }
     }}>
       <summary><Icon name="graph" /><span>Workflow</span>
         {!!sources.length && <small>{sources.length} {sources.length === 1 ? 'source' : 'sources'}{totalClips > 0 && ' · ' + clipCount(totalClips)}</small>}
       </summary>
       {progress}
-      {replay && expanded && replayPreview}
+      {expanded && recordedResearch}
       <div className="graph-frame">
         <div className="graph-board" data-empty={!visible.length}
           style={{ '--rows': Math.max(visible.length, 1), '--mobile-plan': visible.length + 2, '--mobile-motion': visible.length + 3 }}>
@@ -349,9 +338,5 @@ export default function AgentGraph({ project, connection, playback, sources, pla
         </div>
       </div>
     </details>
-    {replayPreview && <button type="button" className="research-replay" aria-expanded={replay && expanded} onClick={toggleReplay}>
-      <span aria-hidden="true">↻</span>{replay && expanded ? 'Close replay' : 'Replay research'}
-    </button>}
-    </div>
   </section>;
 }

@@ -158,14 +158,15 @@ export function Film({ project, film, filmError, captions, poster, videoRef, sta
         {sourcePreview ? <a href={sourcePreview.href} rel="noopener noreferrer" target="_blank">
           Source clip · {timeLabel(sourcePreview.segment.start_seconds)}–{timeLabel(sourcePreview.segment.end_seconds)} on YouTube ↗</a>
           : <span role="status">Chapter {index + 1} {preview.media?.media_mode === 'illustrated_frames' ? '· Illustrated preview' : 'preview'}</span>}
-        <button type="button" className="return-progress" onClick={onClosePreview}>
-          {fullFilmReady ? 'Return to full film' : sourcePreview ? 'Back to guide' : 'Return to progress'}
-        </button>
+        {(fullFilmReady || sourcePreview) && <button type="button" className="return-progress" onClick={onClosePreview}>
+          {fullFilmReady ? 'Return to full film' : 'Back to guide'}
+        </button>}
       </div>}
       {project && <AgentGraph project={project} connection={connection} playback={Boolean(playable || preview || sourcePreview)}
         sources={sources} playing={playing} togglePreview={togglePreview} stopPreview={stopPreview}
-        progress={chapterHelp && <FilmPlaceholder inWorkflow project={project} filmError={filmError} connection={connection} />}
-        replayPreview={!liveResearch && linked.length > 0 ? research : null} />}
+        progress={(chapterHelp || (preview && !fullFilmReady))
+          && <FilmPlaceholder inWorkflow project={project} filmError={filmError} connection={connection} />}
+        recordedResearch={!liveResearch && linked.length > 0 ? research : null} />}
     </div>
     {connection && <p className="stream-connection" role="status">{connection.message}</p>}
   </section>{liveResearch && research}</>;

@@ -42,7 +42,7 @@
 .research-info h3 { margin: 0; font-size: 1.05rem; line-height: 1.27; font-weight: 650; letter-spacing: -.021em; overflow-wrap: anywhere; }
 .research-channel { margin: 3px 0 0; font-size: .8rem; color: var(--muted); }
 .research-actions { margin-top: 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 5px 13px; }
-.research-watch, .research-replay { display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 0; font-weight: 600; }
+.research-watch { display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 0; font-weight: 600; }
 .research-watch { min-height: 34px; padding: 6px 12px; border-radius: 6px; color: #fff; background: #345640; font-size: .78rem; }
 .research-watch:hover { background: #263f2e; }
 .research-watch i { width: 8px; height: 10px; background: currentColor; clip-path: polygon(0 0, 100% 50%, 0 100%); }
@@ -64,15 +64,9 @@
 .research-more { padding: 6px 0 0; border: 0; background: transparent; font-size: .76rem; color: var(--accent); text-decoration: underline; text-underline-offset: .18em; }
 .research-pending { padding: 16px; }
 .research-credit { margin: 0; border-top: 1px solid var(--border); padding: 7px 15px; color: var(--muted); font-size: .69rem; }
-.graph-shell { position: relative; }
-.graph-shell[data-replay=true] .graph-disclosure > summary { position: relative; width: calc(100% - 120px); padding-right: 25px; min-height: 38px; flex-wrap: wrap; }
-.graph-shell[data-replay=true] .graph-disclosure > summary::after { position: absolute; right: 13px; top: 15px; }
-.research-replay { position: absolute; top: 5px; right: 10px; width: 106px; min-height: 28px; padding: 2px 5px; background: #edf2ea; border-radius: 5px; color: var(--accent); font-size: .74rem; }
-.research-replay:hover { background: #e1eadc; }
-.research-replay span { line-height: 1; font-size: 1rem; }
 .graph-disclosure > .research-preview { margin: 0 12px 12px; border-radius: 7px; }
 @container (min-width: 520px) {
-  .research-card:not([data-playing=true]) { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); align-items: center; }
+  .research-card:has(.research-art) { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); align-items: center; }
 }
 @media (pointer: coarse) {
   .research-watch, .research-loop, .research-more, .research-actions a { min-height: 40px; }
