@@ -21,11 +21,11 @@ Each new chapter can select identified segments from the extraction. The server 
 
 The worker decodes images from the actual output across the shot, including its beginning and end. A separate Gemini vision call compares those samples against the chapter and its source observations. Each saved review includes the model, timestamps, findings, attempt and elapsed time.
 
-A clearly contradicted action gets at most one corrective take. The worker withholds footage after an unsuccessful correction. A first take with insufficient evidence or an unavailable reviewer is recorded accordingly and cannot supply a verified reference frame to its child. Sampling can miss events between frames. Readers can compare a tricky movement with its linked tutorial.
+A clearly contradicted action gets at most one corrective take. A passing correction replaces the original. If the correction fails, the original decodable take stays playable and a review note explains the concern. Only footage that passes review can supply a continuity frame to the next dependent step. Sampling can miss events between frames. Readers can compare a tricky movement with its linked tutorial.
 
-When motion generation fails or a corrected take is withheld, the worker prepares one illustrated sequence of the opening, the point of contact and the result. It can reuse the opening and contact from a single take if the reviewer individually confirmed those frames. The image generator receives the chapter’s physical plan, its source observations and any observed errors as it creates the missing images.
+When the provider returns no decodable motion take, the worker prepares one illustrated sequence of the opening, the point of contact and the result. The image generator receives the chapter’s physical plan and its source observations.
 
-A separate visual review checks all three images together. Large stills are sent at chapter playback resolution. If the review times out or the provider has a temporary outage, the worker retries the review once using the same images. Only a sequence that passes all three checks enters the film. The chapter retains its narration, captions and position. Its record identifies the image model, the illustration review and the reason motion failed. When the illustrations also fail, the written guide and any completed narration remain available.
+A separate visual review checks all three images together. Large stills are sent at chapter playback resolution. Temporary review failures get one retry with the same images. An inconclusive or failed review stays attached as a note while the chapter plays with its narration and captions. If the images cannot be generated or encoded, the written guide and any completed narration remain available.
 
 ## Verification
 

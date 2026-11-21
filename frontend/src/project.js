@@ -20,7 +20,7 @@ export function chapterRenderState(number, asset, activity, legacyStage) {
   const video = activity.filter(entry => entry.step_number === number && entry.stage !== 'narration');
   const recovering = video.some(entry => entry.stage === 'illustration');
   const current = recovering ? video.filter(entry => entry.stage !== 'motion') : video;
-  if (current.some(entry => entry.state === 'failed')) return 'error';
+  if (current.some(entry => entry.state === 'failed')) return asset?.status === 'generating' ? 'rendering' : 'error';
   if (current.some(entry => entry.state === 'started')) return 'rendering';
   if (video.length) return 'waiting';
   if (asset?.status === 'generating' || legacyStage?.step_number === number) return 'rendering';

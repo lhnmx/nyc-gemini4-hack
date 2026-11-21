@@ -112,8 +112,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         cart = ShoppingCartProposal(cart_id="paper-cart", checkout_url="https://shop.example/checkout")
         film_ready, release_cart = asyncio.Event(), asyncio.Event()
 
-        async def prepare_cart(*, materials):
+        async def prepare_cart(*, materials, settings):
             self.assertEqual(materials, self.plan.materials)
+            self.assertIs(settings, self.settings)
             await release_cart.wait()
             return cart
 
@@ -177,6 +178,54 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("00:00:02.125 --> 00:00:02.625\nOpen the wings", captions)
         chapter = (self.folder / reloaded.media[2].captions_url.removeprefix("/media/")).read_text()
         self.assertEqual(chapter, "WEBVTT\n\n00:00:00.000 --> 00:00:00.500\nFold the corners inward\n\n")
+
+    async def test_worker_prepares_the_next_guide_while_the_current_film_renders(self):
+        next_guide = ProjectState(project_id="craft-2", goal="Make a clay frog keychain")
+        third_guide = ProjectState(project_id="craft-3", goal="Build a desk organizer")
+        store = await self.enterAsyncContext(open_job_store(self.folder / "guides.sqlite"))
+        for guide in (self.project, next_guide, third_guide):
+            await store.enqueue(guide)
+        queued_for_video, release_first = asyncio.Event(), asyncio.Event()
+        wake, stopping = asyncio.Event(), asyncio.Event()
+        started = []
+        checkpoint = store.checkpoint
+
+        async def persist(worker_id, state, event, data):
+            saved = await checkpoint(worker_id, state, event, data)
+            if state.project_id == next_guide.project_id and data.get("media_progress", {}).get("stage") == "waiting":
+                queued_for_video.set()
+            return saved
+
+        async def render_film(project, publish_event, **options):
+            started.append(project.project_id)
+            if project.project_id == self.project.project_id:
+                await release_first.wait()
+            project.status = ProjectStatus.COMPLETED
+            await publish_event(project.project_id, "status", {"status": "completed"})
+            if project.project_id == third_guide.project_id:
+                stopping.set()
+                wake.set()
+
+        with (patch.object(pipeline, "generate_media_for_plan", side_effect=render_film),
+              patch.object(store, "checkpoint", side_effect=persist)):
+            worker = asyncio.create_task(cloud_worker.consume(store, self.settings, wake, stopping, hosted=False))
+            try:
+                await asyncio.wait_for(queued_for_video.wait(), 5)
+                saved, _ = await store.read(next_guide.project_id)
+                self.assertIsNotNone(saved.plan)
+                self.assertEqual(saved.media_progress.stage, "waiting")
+                events = await store.events_after(next_guide.project_id, 0)
+                self.assertEqual([e["event"] for e in events], [
+                    "status", "research_complete", "status", "plan_ready", "status",
+                ])
+                self.assertEqual((await store.read(third_guide.project_id))[0].status, ProjectStatus.QUEUED)
+                self.assertEqual(started, [self.project.project_id])
+                release_first.set()
+                await asyncio.wait_for(worker, 5)
+                self.assertEqual(started, [self.project.project_id, next_guide.project_id, third_guide.project_id])
+            finally:
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
 
     async def test_next_shot_runs_during_prior_assembly_only_after_real_reference(self):
         self.client.return_value.settings = self.settings.model_copy(update={"pov_video_model": "configured-omni"})
@@ -279,7 +328,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.references, [None, None])
         self.stitch.assert_not_awaited()
 
-    async def test_visual_reviews_survive_reload_withheld_chapter_cannot_seed_another(self):
+    async def test_flagged_chapter_plays_and_cannot_seed_another(self):
         self.plan.steps[1].visual_parent = 0
         self.plan.steps[2].visual_parent = 1
         motion = self.motion.side_effect
@@ -290,29 +339,28 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             shot = await motion(**args)
             if step.step_number == 1:
                 rejected = shot.reviews[0].model_copy(update={"status": "rejected"})
-                raise pipeline.ShotRejected([rejected, rejected.model_copy(update={"attempt": 2})])
+                return pipeline.MotionShot(
+                    shot.video, shot.frames, shot.end_frame,
+                    (rejected, rejected.model_copy(update={"attempt": 2})), selected_attempt=1,
+                )
             if step.step_number == 2:
                 unavailable = shot.reviews[0].model_copy(update={"status": "unavailable"})
                 return pipeline.MotionShot(shot.video, shot.frames, shot.end_frame, (unavailable,))
             return shot
 
         self.motion.side_effect = film
-        self.frames.side_effect = self.recovery_frames
-        self.client.return_value.generate_structured = AsyncMock(side_effect=TimeoutError)
-        with self.assertLogs(pipeline.logger, level="ERROR"):
-            result = await self.run_project()
+        result = await self.run_project()
         saved = ProjectState.model_validate_json(result.model_dump_json())
-        self.assertEqual(saved.status, ProjectStatus.PARTIAL)
+        self.assertEqual(saved.status, ProjectStatus.COMPLETED)
         self.assertEqual(references, {1: None, 2: None, 3: None})
         self.assertEqual([r.status for r in saved.media[1].shot_reviews], ["rejected", "rejected"])
-        self.assertIn("withheld", saved.media[1].error)
-        self.assertEqual(saved.media[1].illustration_review.status, "unavailable")
-        self.assertIn("visual review was unavailable", saved.media[1].error)
-        self.assertFalse(list((self.folder / "craft-1").glob("*_frame_*.png")))
-        self.assertIsNone(saved.media[1].video_url)
+        self.assertEqual(saved.media[1].selected_motion_attempt, 1)
+        self.assertEqual(saved.media[1].status, "ready")
+        self.assertIsNotNone(saved.media[1].video_url)
+        self.frames.assert_not_awaited()
         self.assertEqual(saved.media[2].shot_reviews[-1].status, "unavailable")
         self.assertEqual(saved.media[2].status, "ready")
-        self.stitch.assert_not_awaited()
+        self.stitch.assert_awaited_once()
 
     async def test_serial_visuals_complete_in_guide_order_and_only_share_declared_parent_frames(self):
         self.settings.max_parallel_shots = 1
@@ -410,15 +458,14 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(error["audio_url"].endswith("step_02_voice.wav"))
         self.stitch.assert_not_awaited()
 
-    async def test_rejected_motion_uses_only_reviewed_illustrations_and_preserves_history_on_reuse(self):
+    async def test_failed_motion_keeps_playable_illustrations_when_review_flags_them(self):
         motion = self.motion.side_effect
-        wrong = FrameFinding(verdict="contradicts", sample=1, observation="The paper remains unfolded.")
+        wrong = FrameFinding(verdict="contradicts", sample=3, observation="The paper remains unfolded.")
 
         async def film(**kwargs):
-            shot = await motion(**kwargs)
             if kwargs["step"].step_number == 2:
-                raise pipeline.ShotRejected([shot.reviews[0].model_copy(update={"status": "rejected", "result": wrong})])
-            return shot
+                raise TimeoutError()
+            return await motion(**kwargs)
 
         review_inputs = []
         def inspect(*, contents, response_schema, **kwargs):
@@ -428,7 +475,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             return response_schema.model_validate({
                 name: {"verdict": "matches", "sample": n, "observation": f"Visible {name} on this frame."}
                 for n, name in enumerate(("opening", "contact", "result"), 1)
-            })
+            } | {"result": wrong.model_dump()})
 
         async def assemble(*, out_mp4, frames, **kwargs):
             self.assertEqual([f.read_bytes() for f in frames], list(PNG_FRAMES))
@@ -444,14 +491,13 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([a.media_mode for a in result.media.values()], ["motion", "illustrated_frames", "motion"])
         saved = ProjectState.model_validate_json(result.model_dump_json())
         asset = saved.media[2]
-        self.assertEqual(asset.illustration_review.status, "passed")
+        self.assertEqual(asset.illustration_review.status, "rejected")
         self.assertEqual(asset.illustration_review.source_segment_ids, [])
-        self.assertEqual(asset.shot_reviews[0].result, wrong)
-        self.assertIn(wrong.observation, asset.motion_failure)
+        self.assertEqual(asset.illustration_review.result, wrong)
+        self.assertEqual(asset.motion_failure, "Motion footage timed out.")
         self.assertEqual(asset.keyframe_url, "/media/craft-1/step_02_frame_2.png")
-        self.assertEqual(self.references[-1], self.folder / "craft-1/step_02_frame_3.png")
+        self.assertIsNone(self.references[-1])
         self.assertEqual(self.frames.await_args.kwargs["prev_step_end_frame"], self.folder / "craft-1/1-motion-end.jpg")
-        self.assertEqual(self.frames.await_args.kwargs["correction"], wrong.observation)
         self.assertEqual(len(review_inputs), 2)
         self.assertEqual(review_inputs[0], review_inputs[1])
         self.assertEqual(next(e.state for e in result.activity if e.id == "motion-2"), "failed")

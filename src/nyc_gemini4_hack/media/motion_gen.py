@@ -34,17 +34,18 @@ class MotionShot:
     frames: int
     end_frame: Path
     reviews: tuple[ShotReview, ...]
+    selected_attempt: int | None = None
+
+    @property
+    def selected_review(self) -> ShotReview | None:
+        if self.selected_attempt is not None:
+            return next((review for review in self.reviews if review.attempt == self.selected_attempt), None)
+        return self.reviews[-1] if self.reviews else None
 
     @property
     def continuity_frame(self) -> Path | None:
-        return self.end_frame if self.reviews and self.reviews[-1].status == "passed" else None
-
-
-class ShotRejected(RuntimeError):
-    def __init__(self, reviews: list[ShotReview], reviewed_prefix: tuple[bytes, ...] = ()):
-        super().__init__("The footage did not pass visual review.")
-        self.reviews = list(reviews)
-        self.reviewed_prefix = reviewed_prefix
+        review = self.selected_review
+        return self.end_frame if review and review.status == "passed" else None
 
 
 class MotionOutputError(RuntimeError):
@@ -116,7 +117,7 @@ async def generate_motion_shot(
     prev_step_end_frame: Path | None = None,
     speech_seconds: float | None = None,
 ) -> MotionShot:
-    """Inspect each candidate before publishing it or releasing a continuity reference."""
+    """Prefer imagery that passes review and retain the first decodable take as a fallback."""
     prompt = _shot_prompt(step, bible, prev_step_end_frame is not None)
     if speech_seconds is None:
         speech_seconds = len(step.narration_script.split()) / 2.3
@@ -125,13 +126,13 @@ async def generate_motion_shot(
     output = out_dir / f"step_{step.step_number:02d}_motion.mp4"
     end_frame = out_dir / f"step_{step.step_number:02d}_pov_end.jpg"
     reviews: list[ShotReview] = []
-    reviewed_prefix: tuple[bytes, ...] = ()
     opening = prev_step_end_frame
     target = target_origin = None
     target_preparation_seconds = None
-    try:
-        async with asyncio.timeout(MOTION_TIMEOUT):
-            with TemporaryDirectory(dir=out_dir) as staging:
+    with TemporaryDirectory(dir=out_dir) as staging:
+        preferred = None
+        try:
+            async with asyncio.timeout(MOTION_TIMEOUT):
                 for attempt in (1, 2):
                     directory = Path(staging) / str(attempt)
                     directory.mkdir()
@@ -139,6 +140,9 @@ async def generate_motion_shot(
                     video = directory / "motion.mp4"
                     await _render_candidate(gemini, prompt, duration, opening, target, video)
                     count, samples = await run_media_work(_sample_motion, video, directory)
+                    candidate = (video, count, samples[-1][1], attempt)
+                    if preferred is None:
+                        preferred = candidate
                     review = await inspect_shot(
                         gemini, step, samples, attempt=attempt, render_seconds=monotonic() - started,
                         reference_mode="first_last_frames" if target else "first_frame" if opening else "text",
@@ -151,18 +155,8 @@ async def generate_motion_shot(
                     logger.info("Step %s attempt %s: render %.2fs, visual review %.2fs (%s)",
                                 step.step_number, attempt, review.render_seconds, review.review_seconds, review.status)
                     if review.status == "passed" or (attempt == 1 and review.status != "rejected"):
-                        samples[-1][1].replace(end_frame)
-                        video.replace(output)
-                        return MotionShot(output, count, end_frame, tuple(reviews))
-                    # Save only individually confirmed setup/contact stills from ONE take for
-                    # illustration recovery. The rejected movie and its endpoint stay in staging.
-                    if review.opening and review.opening.verdict == "matches":
-                        prefix = [samples[0][1]]
-                        contact = review.contact
-                        if contact and contact.verdict == "matches" and 1 < contact.sample < len(samples):
-                            prefix.append(samples[contact.sample - 1][1])
-                        if len(prefix) >= len(reviewed_prefix):
-                            reviewed_prefix = tuple(path.read_bytes() for path in prefix)
+                        preferred = candidate
+                        break
                     if attempt == 2:
                         break
                     # A rejected shot stays in staging. Reuse only a boundary individually confirmed by the reviewer.
@@ -177,11 +171,15 @@ async def generate_motion_shot(
                         target_origin = "reviewed_illustration" if target else None
                     prompt = (_shot_prompt(step, bible, opening is not None)
                               + "\nCorrect the following observed discrepancy in a fresh take:\n" + problem)
-    except Exception as exc:
-        if reviews and reviews[0].status == "rejected":
-            raise ShotRejected(reviews, reviewed_prefix) from exc
-        raise
-    raise ShotRejected(reviews, reviewed_prefix)
+        except Exception as exc:
+            if preferred is None:
+                raise
+            logger.info("Step %s using its decodable first take after %s", step.step_number, type(exc).__name__)
+
+        video, count, frame, attempt = preferred
+        frame.replace(end_frame)
+        video.replace(output)
+        return MotionShot(output, count, end_frame, tuple(reviews), selected_attempt=attempt)
 
 
 async def _render_candidate(gemini: Gemini4Client, prompt: str, duration: int,

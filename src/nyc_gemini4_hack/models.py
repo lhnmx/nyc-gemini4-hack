@@ -274,6 +274,7 @@ class StepMediaAsset(BaseModel):
     media_mode: Literal["motion", "illustrated_frames"] | None = None
     video_model: str | None = None
     shot_reviews: list[ShotReview] = Field(default_factory=list)
+    selected_motion_attempt: int | None = Field(default=None, ge=1, le=2)
     motion_failure: str | None = None
     illustration_review: VisualReview | None = None
     voice_model: str | None = None
@@ -323,7 +324,7 @@ class AgentActivity(BaseModel):
 
 
 class MediaProgress(BaseModel):
-    stage: Literal["footage", "assembly", "stitching"]
+    stage: Literal["waiting", "footage", "assembly", "stitching"]
     step_count: int = Field(ge=0)
     ready_count: int = Field(ge=0)
     elapsed_seconds: float = Field(ge=0)

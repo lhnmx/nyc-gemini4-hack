@@ -11,7 +11,7 @@ One Vercel project hosts the React workbench, the FastAPI web API, and a renderi
 5. Deploy to **Production**. Vercel builds the worker container from `src/` and starts one renderer in `iad1`. Each accepted submission can invoke generation services under the configured keys. Use the project's deployment access settings for your intended audience. [Deployment Protection](https://vercel.com/docs/deployment-protection)
 6. Open `/api/health` and check `generation_ready`. Its message identifies missing configuration or an offline worker. Open the example in the workbench to verify video, captions and chapter seeking. Submit a short project to exercise your live provider credentials. Refresh the page during rendering to check that its saved progress loads.
 
-Daemons currently run in production only and use provisioned memory while idle. The daemon entry in [vercel.json](vercel.json) controls instance count and shutdown grace time. Each worker claims one job at a time. A higher instance count processes additional guides concurrently. [Daemon availability and quotas](https://vercel.com/docs/daemons)
+Daemons currently run in production only and use provisioned memory while idle. The daemon entry in [vercel.json](vercel.json) controls instance count and shutdown grace time. Each instance can research and plan the next guide while it renders the current one. A higher instance count can render additional guides concurrently. [Daemon availability and quotas](https://vercel.com/docs/daemons)
 
 ## SQLite state and media
 

@@ -81,7 +81,7 @@ class CoachApiTests(unittest.TestCase):
             self.assertEqual(resp.status_code, 503)
 
     def test_coach_session_endpoint_for_stored_project(self):
-        async def make_plan(project, publish_event):
+        async def make_plan(project, publish_event, **options):
             project.plan = paper_plan()
             project.status = ProjectStatus.COMPLETED
             project.status_message = "Done"

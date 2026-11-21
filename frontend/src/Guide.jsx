@@ -182,8 +182,13 @@ export function ChapterFallback({ chapter, inPlayer, audioRef, planSources, onWa
 }
 
 export function GuideStep({ chapter, count, index, onSelect, headingRef, onWatch, chapterHelp }) {
-  const { step, state, sources } = chapter;
+  const { step, state, sources, media } = chapter;
   const hasVideo = state === 'ready' || state === 'timed';
+  const review = media?.media_mode === 'illustrated_frames' ? media.illustration_review
+    : media?.shot_reviews?.find(attempt => attempt.attempt === media.selected_motion_attempt);
+  const reviewConcern = review && ['rejected', 'uncertain'].includes(review.status);
+  const finding = reviewConcern && [review.result, review.contact, review.opening]
+    .find(item => item?.verdict === (review.status === 'rejected' ? 'contradicts' : 'unclear'));
   return <article className="step-card" aria-labelledby="step-title">
     <div className="step-controls">
       <p className="step-count">Step {index + 1} of {count}</p>
@@ -195,6 +200,11 @@ export function GuideStep({ chapter, count, index, onSelect, headingRef, onWatch
     <h2 id="step-title" ref={headingRef} tabIndex="-1">{step.title}</h2>
     <Instruction text={step.instruction_text} />
     {chapterHelp}
+    {hasVideo && reviewConcern && <details className="review-note">
+      <summary>Footage review note</summary>
+      <p>Follow the written instructions for any movement that looks different in the video.</p>
+      {finding?.observation && <p>{finding.observation}</p>}
+    </details>}
     <StepNotes step={step} sourceLinks={hasVideo ? sources : []} />
     {onWatch && <button className="chapter-watch secondary" type="button" onClick={() => onWatch(index)}>
       <i className="chapter-icon ready" aria-hidden="true" /> Watch this chapter

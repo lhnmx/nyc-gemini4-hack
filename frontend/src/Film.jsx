@@ -46,7 +46,8 @@ function FilmPlaceholder({ project, filmError, connection, inWorkflow }) {
     : active.includes('narration') ? 'Recording narration'
     : assemblingStep && active.includes('assembly') ? 'Assembling chapter ' + assemblingStep
     : active.includes('assembly') ? 'Assembling chapters' : null;
-  const stageTitle = (status === 'generating' && producing) || stageNames[status] || 'Opening your guide';
+  const waitingForVideo = status === 'generating' && mediaProgress?.stage === 'waiting';
+  const stageTitle = waitingForVideo ? 'Video queued' : (status === 'generating' && producing) || stageNames[status] || 'Opening your guide';
   const disconnected = connection && !terminal;
   const title = filmError ? 'Playback unavailable' : disconnected ? 'Live updates interrupted' : stageTitle;
   const activeSteps = (project?.plan?.steps || []).filter(step => legacyStage?.step_number === step.step_number
@@ -58,7 +59,7 @@ function FilmPlaceholder({ project, filmError, connection, inWorkflow }) {
   const operation = reviewingSources ? 'Reviewing ' + reviewingSources + (reviewingSources === 1 ? ' YouTube tutorial.' : ' YouTube tutorials.')
     : current?.detail || current?.label;
   const detail = filmError ? 'You can follow the written steps.' : disconnected ? 'Last report · ' + stageTitle : {
-    submitting: '', queued: '',
+    submitting: '', queued: 'Research starts automatically when a spot opens. You can keep this page open for updates.',
     researching: operation || project?.status_message,
     planning: operation || project?.status_message,
     generating: records.length || activeSteps.length ? mediaDetail : project?.status_message || 'Preparing the footage and narration.',
@@ -69,7 +70,7 @@ function FilmPlaceholder({ project, filmError, connection, inWorkflow }) {
   return <div className={inWorkflow ? 'workflow-progress' : 'film-placeholder'}>
     <div className="film-foot">{!inWorkflow && <span className="film-bug"><i className="viewfinder" aria-hidden="true" /> Guide film</span>}
       {total > 0 && !filmError && <span>{count} of {total} chapters ready</span>}
-      {Number.isFinite(mediaProgress?.elapsed_seconds) && !terminal && <span>Media time {timeLabel(mediaProgress.elapsed_seconds)}</span>}
+      {Number.isFinite(mediaProgress?.elapsed_seconds) && !terminal && !waitingForVideo && <span>Media time {timeLabel(mediaProgress.elapsed_seconds)}</span>}
     </div>
     <div className="film-output" role="status" aria-atomic="true">
       <strong>{title}</strong>

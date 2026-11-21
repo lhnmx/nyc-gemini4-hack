@@ -15,9 +15,8 @@ from google import genai
 from nyc_gemini4_hack.config import Settings
 from nyc_gemini4_hack.gemini_client import Gemini4Client
 from nyc_gemini4_hack.media.motion_gen import (
-    ShotRejected, _shot_prompt, compose_motion_with_voice, generate_motion_shot, generate_step_motion,
+    _shot_prompt, compose_motion_with_voice, generate_motion_shot, generate_step_motion,
 )
-from nyc_gemini4_hack.media.video_gen import generate_step_pov_frames
 from nyc_gemini4_hack.models import BuildStep, PhysicalStateTransition, StepSourceSegment, VisualContinuityBible
 from tests.test_video import PNG_FRAMES, decode, write_tone
 
@@ -276,18 +275,18 @@ class MotionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(renders), 1)
                 self.assertEqual(motion.video.read_bytes(), video)
 
-    async def test_unresolved_contact_fault_spends_one_retry_and_never_replaces_existing_motion(self):
+    async def test_unresolved_correction_keeps_first_decodable_take_and_its_review(self):
         video = moving_shot(self.folder / "moving.mp4").read_bytes()
-        existing = self.folder / "step_01_motion.mp4"
-        existing.write_bytes(b"prior usable shot")
-        previous_end = self.folder / "step_01_pov_end.jpg"
-        previous_end.write_bytes(b"prior usable reference")
-        for second_status in ("rejected", "uncertain", "unavailable"):
+        different_take = video + b"\x00\x00\x00\x08free"
+        for second_status in ("rejected", "uncertain", "unavailable", "bad_video"):
             renders = []
+
             def transport(request):
                 if request.url.path.endswith("/interactions"):
                     renders.append(json.loads(request.content))
-                    return motion_response(video)
+                    if len(renders) == 1:
+                        return motion_response(video)
+                    return motion_response(b"broken video" if second_status == "bad_video" else different_take)
                 findings = sample_findings()
                 if len(renders) == 2 and second_status == "unavailable":
                     return httpx.Response(403, json={"error": {"code": 403, "message": "disabled"}})
@@ -296,60 +295,19 @@ class MotionTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     findings["contact"].update(verdict="contradicts", observation="Presser foot is visibly lifted.")
                 return structured_response(findings)
+
             with self.subTest(second_status=second_status):
                 client = await self.client_with(transport)
-                with self.assertRaises(ShotRejected) as failure:
-                    await generate_motion_shot(self.step, self.bible, self.folder, client)
-                self.assertEqual([r.status for r in failure.exception.reviews], ["rejected", second_status])
-                self.assertEqual(failure.exception.reviews[-1].target_origin, "reviewed_render")
+                shot = await generate_motion_shot(self.step, self.bible, self.folder, client)
+                expected = ["rejected"] if second_status == "bad_video" else ["rejected", second_status]
+                self.assertEqual([r.status for r in shot.reviews], expected)
+                self.assertEqual(shot.selected_attempt, 1)
+                self.assertEqual(shot.selected_review.contact.observation, "Presser foot is visibly lifted.")
+                self.assertIsNone(shot.continuity_frame)
                 self.assertIn("Presser foot", renders[1]["input"][0]["content"][-1]["text"])
                 self.assertEqual(len(renders), 2)
-                self.assertEqual(existing.read_bytes(), b"prior usable shot")
-                self.assertEqual(previous_end.read_bytes(), b"prior usable reference")
-
-    async def test_illustrations_reuse_only_confirmed_setup_and_contact_from_the_same_take(self):
-        source = moving_shot(self.folder / "source.mp4")
-        positions = bar_locations(source)
-        previous = self.folder / "previous.png"
-        previous.write_bytes(PNG_FRAMES[0])
-        takes, images = [], []
-        error = "The result shows a slit through the attached mound."
-
-        def transport(request):
-            body = json.loads(request.content)
-            if request.url.path.endswith("/interactions"):
-                takes.append(body)
-                return motion_response(source.read_bytes())
-            if "responseSchema" in body["generationConfig"]:
-                findings = sample_findings()
-                if len(takes) == 1:
-                    findings["opening"]["verdict"] = "contradicts"
-                findings["result"].update(verdict="contradicts", observation=error)
-                return structured_response(findings)
-            images.append(body["contents"][0]["parts"])
-            return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"inlineData": {
-                "mimeType": "image/png", "data": base64.b64encode(PNG_FRAMES[2]).decode(),
-            }}]}}]})
-
-        client = await self.client_with(transport)
-        with self.assertRaises(ShotRejected) as failure:
-            await generate_motion_shot(self.step, self.bible, self.folder, client, previous)
-        rejection = failure.exception
-        self.assertEqual(len(takes), 2)
-        self.assertEqual(rejection.reviews[1].contact.sample, 4)
-        self.assertEqual(len(rejection.reviewed_prefix), 2)
-        frames = await generate_step_pov_frames(
-            self.step, self.bible, self.folder, client, reviewed_prefix=rejection.reviewed_prefix, correction=error,
-        )
-        self.assertEqual([frame.read_bytes() for frame in frames[:2]], list(rejection.reviewed_prefix))
-        self.assertAlmostEqual(bar_locations(frames[0])[0], positions[0], delta=1)
-        self.assertAlmostEqual(bar_locations(frames[1])[0], positions[12], delta=1)
-        self.assertEqual(frames[2].read_bytes(), PNG_FRAMES[2])
-        self.assertEqual(len(images), 1)
-        reference, prompt = images[0]
-        self.assertEqual(base64.urlsafe_b64decode(reference["inlineData"]["data"]), frames[1].read_bytes())
-        self.assertIn(error, prompt["text"])
-        self.assertFalse((self.folder / "step_01_motion.mp4").exists())
+                self.assertEqual(shot.video.read_bytes(), video)
+                self.assertEqual(len(bar_locations(shot.video)), 24)
 
     async def test_rejected_target_is_excluded_from_the_correction_request(self):
         video = moving_shot(self.folder / "moving.mp4").read_bytes()

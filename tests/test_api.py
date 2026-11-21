@@ -24,7 +24,7 @@ class ApiTests(unittest.TestCase):
         self.settings = Settings(_env_file=None, gemini_api_key="test", youtube_api_key="test",
                                  sqlite_path=root / "data" / "jobs.sqlite3", media_output_dir=root / "media")
 
-    async def make_guide(self, project, publish_event):
+    async def make_guide(self, project, publish_event, **options):
         project.plan = paper_plan()
         await publish_event(project.project_id, "plan_ready", project.plan.model_dump(mode="json"))
         directory = self.settings.media_output_dir / project.project_id
@@ -206,7 +206,7 @@ class ApiTests(unittest.TestCase):
                         await release.wait()
                     uploads.append(name)
 
-                async def two_chapters(state, publish_event):
+                async def two_chapters(state, publish_event, **options):
                     async def ready(number, name):
                         clip = StepMediaAsset(step_number=number, status="ready",
                                               video_url=f"/media/{state.project_id}/{name}.mp4")
@@ -239,7 +239,7 @@ class ApiTests(unittest.TestCase):
 
         allow_render = Event()
 
-        async def delayed(project, publish_event):
+        async def delayed(project, publish_event, **options):
             await asyncio.to_thread(allow_render.wait, 3)
             return await self.make_guide(project, publish_event)
 

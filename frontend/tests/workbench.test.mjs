@@ -303,6 +303,7 @@ test('shows the film surface before submission returns and preserves it as the w
     assert.equal(await page.getByRole('heading', { name: 'Fold a paper envelope' }).isVisible(), true);
   } finally { accept(); }
   await page.getByText('Your guide is queued').waitFor();
+  await page.getByText(/Research starts automatically/).waitFor();
   assert.equal(await page.locator('#generation-panel .graph-node.agent:visible').count(), 3);
   await capture(page, 'phone-queued');
 });
@@ -343,6 +344,11 @@ test('shows observed contributors, decisions, measured media progress and concur
   await graph.locator('[data-node=review-video_2_relevance]').click();
   await details.getByText('Structured fallback · fallback-model').waitFor();
   await emit(page, 'plan_ready', plan);
+  await emit(page, 'status', { status: 'generating', message: 'Waiting for video capacity.',
+    media_progress: { stage: 'waiting', step_count: 2, ready_count: 0, elapsed_seconds: 0 } });
+  await page.getByText('Video queued', { exact: true }).waitFor();
+  assert.equal(await page.locator('#step-list button').first().getAttribute('data-chapter-state'), 'queued');
+  assert.equal(await page.getByText('Media time 0:00').count(), 0);
   const media_progress = { stage: 'footage', step_number: 1, step_count: 2, ready_count: 0, elapsed_seconds: 12 };
   await emit(page, 'status', { status: 'generating', message: 'Preparing the first chapter.', media_progress });
   await page.getByText('Creating chapter footage').waitFor();

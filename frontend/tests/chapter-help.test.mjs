@@ -99,10 +99,19 @@ for (const width of [1280, 320]) {
       if (width < 851) await page.locator('#step-picker > summary').click();
       await page.locator(width < 851 ? '#mobile-step-list button' : '#step-list button').nth(index).click();
     }
-    const third = { step_number: 3, status: 'ready', video_url: '/media/frog/smile.mp4', media_mode: 'illustrated_frames' };
+    const reviewNote = 'The smile lands a little too low on the face.';
+    const third = { step_number: 3, status: 'ready', video_url: '/media/frog/smile.mp4', media_mode: 'illustrated_frames',
+      illustration_review: { status: 'rejected', result: { verdict: 'contradicts', observation: reviewNote } } };
+    await emit(page, 'step_media_started', { step_number: 3, status: 'generating' });
+    await emit(page, 'activity', { id: 'motion-3', step_number: 3, stage: 'motion', state: 'failed',
+      label: 'Chapter footage', agent: 'Gemini', detail: 'The first video file could not be decoded.' });
+    const outline = page.locator(width < 851 ? '#mobile-step-list button' : '#step-list button');
+    assert.equal(await outline.nth(2).getAttribute('data-chapter-state'), 'rendering');
     await emit(page, 'step_media_ready', third);
     await chapter(2);
     await page.waitForFunction(() => document.querySelector('#chapter-video')?.currentTime > 0);
+    await page.getByText('Footage review note').click();
+    await page.getByText(reviewNote).waitFor();
     await page.locator('#chapter-video').evaluate(el => { window.chapterPlayer = el; });
     await shop.click();
     assert.equal(await offer.isVisible(), true);

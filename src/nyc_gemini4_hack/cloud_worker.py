@@ -17,7 +17,10 @@ from nyc_gemini4_hack.pipeline import run_project_pipeline
 logger = logging.getLogger(__name__)
 
 
-async def render(store: JobStore, worker_id: str, project: ProjectState, settings: Settings, *, hosted: bool) -> None:
+async def render(
+    store: JobStore, worker_id: str, project: ProjectState, settings: Settings, *, hosted: bool,
+    planning_slot: asyncio.Lock | None = None, media_slot: asyncio.Lock | None = None,
+) -> None:
     # Intake has already uploaded the desk photo. The pipeline publishes the rest.
     published = blob_media.media_names(project)
     finished = False
@@ -37,7 +40,9 @@ async def render(store: JobStore, worker_id: str, project: ProjectState, setting
             if event == "status" and snapshot.status.terminal:
                 finished = True
 
-    job = asyncio.create_task(run_project_pipeline(project, publish_event=checkpoint))
+    job = asyncio.create_task(run_project_pipeline(
+        project, publish_event=checkpoint, settings=settings, planning_slot=planning_slot, media_slot=media_slot,
+    ))
     try:
         while not job.done():
             done, _ = await asyncio.wait([job], timeout=20)
@@ -65,19 +70,35 @@ async def render(store: JobStore, worker_id: str, project: ProjectState, setting
 
 async def consume(store: JobStore, settings: Settings, wake: asyncio.Event, stopping: asyncio.Event,
                   *, hosted: bool) -> None:
+    claim_slot, planning_slot, media_slot = asyncio.Lock(), asyncio.Lock(), asyncio.Lock()
+    async with asyncio.TaskGroup() as workers:
+        # Prepare one guide ahead of the current film without starting a second film.
+        for _ in range(2):
+            workers.create_task(_consume(
+                store, settings, wake, stopping, claim_slot, planning_slot, media_slot, hosted=hosted,
+            ))
+
+
+async def _consume(
+    store: JobStore, settings: Settings, wake: asyncio.Event, stopping: asyncio.Event,
+    claim_slot: asyncio.Lock, planning_slot: asyncio.Lock, media_slot: asyncio.Lock, *, hosted: bool,
+) -> None:
     worker_id = str(uuid4())
     while not stopping.is_set():
         try:
             wake.clear()
-            project = await store.claim(worker_id)
+            async with claim_slot:
+                project = None if stopping.is_set() else await store.claim(worker_id)
             if project:
                 if hosted:
-                    # Only the standalone daemon uses a temporary workspace and one job at a time.
+                    # Each hosted guide owns a workspace even during overlapping research.
                     with TemporaryDirectory(prefix="craftpov-render-") as workspace:
-                        settings.media_output_dir = Path(workspace)
-                        await render(store, worker_id, project, settings, hosted=True)
+                        scoped = settings.model_copy(update={"media_output_dir": Path(workspace)})
+                        await render(store, worker_id, project, scoped, hosted=True,
+                                     planning_slot=planning_slot, media_slot=media_slot)
                 else:
-                    await render(store, worker_id, project, settings, hosted=False)
+                    await render(store, worker_id, project, settings, hosted=False,
+                                 planning_slot=planning_slot, media_slot=media_slot)
                 continue
         except Exception:
             logger.exception("Could not retrieve or checkpoint a guide")

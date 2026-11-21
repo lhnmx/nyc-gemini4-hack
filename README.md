@@ -202,7 +202,7 @@ src/nyc_gemini4_hack/
   media/composer.py            Chapter MP4s, WebVTT, full film
   shopping.py                  UCP catalog search
   job_store.py                 Local SQLite and Turso
-  cloud_worker.py              Daemon that claims one job at a time
+  cloud_worker.py              Prepares guides ahead while rendering one film at a time
   web/example/                 Paper-plane film, captions, and project.json
 frontend/src/                  React workbench (Vite 8)
 ucp-agent-profile.json         Shopify UCP agent profile
