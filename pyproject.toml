@@ -1,13 +1,23 @@
 [project]
 name = "nyc-gemini4-hack"
 version = "0.1.0"
-description = "Add your description here"
+description = "CraftPOV — Multimodal POV physical-world build guide powered by Gemini 4 (Argon, Carbon, Neon, Hydrogen), Decisions API, Veo, and Shopify MCP"
 readme = "README.md"
 authors = [
     { name = "Minh Le", email = "lehnminh@gmail.com" }
 ]
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "fastapi>=0.115.0",
+    "google-genai>=1.0.0",
+    "httpx>=0.28.0",
+    "mcp>=1.2.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
+    "python-dotenv>=1.0.1",
+    "python-multipart>=0.0.20",
+    "uvicorn[standard]>=0.32.0",
+]
 
 [project.scripts]
 nyc-gemini4-hack = "nyc_gemini4_hack:main"

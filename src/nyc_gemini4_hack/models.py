@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from enum import StrEnum
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+class ProjectStatus(StrEnum):
+    QUEUED = "queued"
+    RESEARCHING = "researching"
+    PLANNING = "planning"
+    GENERATING = "generating"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class MaterialStatus(StrEnum):
+    BUY = "BUY"
+    OWNED_EXACT = "OWNED_EXACT"
+    OWNED_SUBSTITUTE = "OWNED_SUBSTITUTE"
+
+
+class CheckinVerdict(StrEnum):
+    PASS = "PASS"
+    ADJUST = "ADJUST"
+    REDO = "REDO"
+
+
+class DecisionResult(BaseModel):
+    """Structured output returned by the Decisions API / gating layer."""
+
+    gate_name: str
+    choice: str
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    rationale: str = ""
+    model_used: str = ""
+    via_decisions_api: bool = False
+
+
+class TutorialSegment(BaseModel):
+    timestamp_start: str
+    timestamp_end: str
+    technique: str
+    hand_action: str
+    tools_visible: list[str] = Field(default_factory=list)
+    notes: str = ""
+
+
+class TutorialExtract(BaseModel):
+    """Structured multimodal extraction from a single YouTube video (Gemini 4 Carbon)."""
+
+    video_id: str
+    url: str
+    title: str
+    channel: str = ""
+    language_or_audio_notes: str = ""
+    extracted_materials: list[str] = Field(default_factory=list)
+    segments: list[TutorialSegment] = Field(default_factory=list)
+    common_mistakes: list[str] = Field(default_factory=list)
+
+
+class MaterialItem(BaseModel):
+    id: str
+    name: str
+    category: str = "material"  # "material" | "tool"
+    quantity: str = "1"
+    required: bool = True
+    search_query: str
+    status: MaterialStatus = MaterialStatus.BUY
+    substitute_note: str | None = None
+
+
+class VisualContinuityBible(BaseModel):
+    workspace_surface: str
+    lighting: str
+    camera_style: str
+    subject_palette: str
+    hands_description: str = "clean maker hands, natural skin tone, no distracting jewelry"
+
+
+class PhysicalStateTransition(BaseModel):
+    start_state: str
+    hand_kinematics: str
+    end_state: str
+    verification_cues: list[str] = Field(default_factory=list)
+
+
+class BuildStep(BaseModel):
+    step_number: int
+    title: str
+    instruction_text: str
+    narration_script: str
+    pov_video_prompt: str
+    physical_state: PhysicalStateTransition
+    tips: list[str] = Field(default_factory=list)
+    duration_seconds: int = 6
+
+
+class BuildPlan(BaseModel):
+    project_title: str
+    difficulty: str = "beginner"
+    estimated_time_minutes: int = 30
+    source_youtube_urls: list[str] = Field(default_factory=list)
+    continuity_bible: VisualContinuityBible
+    materials: list[MaterialItem] = Field(default_factory=list)
+    steps: list[BuildStep] = Field(default_factory=list)
+
+
+class CartLineItem(BaseModel):
+    material_id: str
+    material_name: str
+    product_title: str
+    variant_id: str
+    price: str
+    rationale: str | None = None
+    product_url: str | None = None
+    image_url: str | None = None
+
+
+class ShoppingCartProposal(BaseModel):
+    cart_id: str | None = None
+    checkout_url: str | None = None
+    matched_items: list[CartLineItem] = Field(default_factory=list)
+    unmatched_materials: list[str] = Field(default_factory=list)
+
+
+class StepMediaAsset(BaseModel):
+    step_number: int
+    status: str = "pending"  # "pending" | "generating" | "ready" | "error"
+    keyframe_url: str | None = None
+    video_url: str | None = None
+    audio_url: str | None = None
+    error: str | None = None
+
+
+class CheckinResponse(BaseModel):
+    step_number: int
+    verdict: CheckinVerdict
+    feedback_text: str
+    audio_url: str | None = None
+    decision: DecisionResult | None = None
+
+
+class ProjectEvent(BaseModel):
+    event: str
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectState(BaseModel):
+    project_id: str
+    goal: str
+    owned_items: list[str] = Field(default_factory=list)
+    desk_photo_url: str | None = None
+    status: ProjectStatus = ProjectStatus.QUEUED
+    status_message: str = "Queued"
+    plan: BuildPlan | None = None
+    cart: ShoppingCartProposal | None = None
+    media: dict[int, StepMediaAsset] = Field(default_factory=dict)
+    decisions_log: list[DecisionResult] = Field(default_factory=list)
+    error: str | None = None
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class CreateProjectRequest(BaseModel):
+    goal: str = Field(..., min_length=2, max_length=300)
+    owned_items: list[str] = Field(default_factory=list)
+
+
+class RebuildCartRequest(BaseModel):
+    owned_material_ids: list[str] = Field(default_factory=list)
