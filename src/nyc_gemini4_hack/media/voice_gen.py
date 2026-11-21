@@ -6,7 +6,9 @@ import logging
 import shutil
 import subprocess
 import wave
+from email.message import Message
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import imageio_ffmpeg
 
@@ -15,105 +17,92 @@ from nyc_gemini4_hack.gemini_client import Gemini4Client
 logger = logging.getLogger(__name__)
 
 
-def _pcm_to_wav(pcm_bytes: bytes, out_path: Path, sample_rate: int = 24000) -> Path:
-    with wave.open(str(out_path), "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)  # 16-bit PCM
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm_bytes)
-    return out_path
+def _check_wav(path: Path) -> None:
+    with wave.open(str(path), "rb") as recording:
+        frames = recording.getnframes()
+        frame_size = recording.getnchannels() * recording.getsampwidth()
+        if not frames or recording.getframerate() <= 0:
+            raise ValueError("The narration recording is empty or incomplete.")
+        if len(recording.readframes(frames)) != frames * frame_size:
+            raise ValueError("The narration recording is empty or incomplete.")
+
+
+def _write_audio(audio, out_wav: Path) -> None:
+    if not audio or not audio.data:
+        raise ValueError("The speech model returned no audio.")
+    raw = base64.b64decode(audio.data, validate=True) if isinstance(audio.data, str) else bytes(audio.data)
+    content_type = Message()
+    content_type["Content-Type"] = audio.mime_type or "audio/wav"
+    mime = content_type.get_content_type()
+    if mime in {"audio/wav", "audio/wave", "audio/x-wav"}:
+        out_wav.write_bytes(raw)
+    elif mime in {"audio/pcm", "audio/l16"}:
+        # Gemini returns signed little-endian samples, including for its audio/l16 format.
+        rate = getattr(audio, "sample_rate", None)
+        channels = getattr(audio, "channels", None)
+        if rate is None:
+            rate = int(content_type.get_param("rate", 24000))
+        if channels is None:
+            channels = int(content_type.get_param("channels", 1))
+        if rate <= 0 or channels <= 0 or len(raw) % (2 * channels):
+            raise ValueError("Invalid PCM metadata or incomplete audio frame.")
+        with wave.open(str(out_wav), "wb") as recording:
+            recording.setparams((channels, 2, rate, 0, "NONE", "not compressed"))
+            recording.writeframes(raw)
+    elif mime in {"audio/mpeg", "audio/mp3", "audio/ogg", "audio/ogg_opus"}:
+        encoding = "ogg" if mime.startswith("audio/ogg") else "mp3"
+        subprocess.run([
+            imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-f", encoding,
+            "-i", "pipe:0", "-ar", "24000", "-ac", "1", str(out_wav),
+        ], input=raw, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30, check=True)
+    else:
+        raise ValueError(f"Unsupported speech audio format: {mime}")
+    _check_wav(out_wav)
 
 
 async def _generate_gemini_audio(
     script: str,
     out_wav: Path,
     gemini: Gemini4Client,
-    timeout_s: float = 15.0,
-) -> Path | None:
-    """Try native Gemini Interactions API audio generation (gemini-omni-flash-preview)."""
-    model = gemini.settings.audio_model
-    if not hasattr(gemini.client, "interactions"):
-        return None
-
-    def _call() -> object:
-        return gemini.client.interactions.create(
-            model=model,
+    duration_seconds: int,
+    timeout_s: float = 30.0,
+) -> None:
+    style = (
+        "Speak like a patient craft teacher beside one learner. Start immediately and stress the action verb. "
+        f"Aim for a natural reading in about {duration_seconds} seconds. Give measurements time to land."
+    )
+    async with asyncio.timeout(timeout_s):
+        response = await gemini.client.aio.interactions.create(
+            model=gemini.settings.audio_model,
             api_version="v1beta",
-            input=(
-                "Speak ONLY the following craft instruction clearly, warmly, and naturally "
-                "at a calm instructional pace (do not add any extra words):\n"
-                f"{script}"
-            ),
-            response_modalities=["audio"],
+            input=[{
+                "type": "user_input",
+                "content": [{
+                    "type": "text", "text": script,
+                    "annotations": [{"type": "speech_metadata", "style": style}],
+                }],
+            }],
+            response_format={"type": "audio", "mime_type": "audio/wav"},
+            generation_config={"speech_config": [{"voice": gemini.settings.tts_voice}]},
+            timeout=timeout_s,
         )
-
-    try:
-        resp = await asyncio.wait_for(asyncio.to_thread(_call), timeout=timeout_s)
-    except Exception as exc:
-        logger.warning("Gemini native audio (%s) unavailable/timed out (%s); using TTS fallback.", model, exc)
-        return None
-
-    outputs = getattr(resp, "outputs", None) or []
-    for item in outputs:
-        data = getattr(item, "data", None)
-        mime = (getattr(item, "mime_type", None) or "").lower()
-        if not data:
-            continue
-        raw = base64.b64decode(data) if isinstance(data, str) else bytes(data)
-        if "pcm" in mime or "l16" in mime:
-            return _pcm_to_wav(raw, out_wav, sample_rate=24000)
-        if "wav" in mime:
-            out_wav.write_bytes(raw)
-            return out_wav
-        # Convert mp3/ogg/etc. to WAV via bundled ffmpeg
-        tmp_path = out_wav.with_suffix(".raw_audio")
-        tmp_path.write_bytes(raw)
-        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-        subprocess.run(
-            [ffmpeg, "-y", "-i", str(tmp_path), "-ar", "44100", "-ac", "1", str(out_wav)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        tmp_path.unlink(missing_ok=True)
-        return out_wav
-
-    return None
+    await asyncio.to_thread(_write_audio, response.output_audio, out_wav)
 
 
-async def _generate_macos_tts(script: str, out_wav: Path) -> Path:
-    """Fast, zero-latency local macOS neural voice fallback converted to WAV via ffmpeg."""
-    say_bin = shutil.which("say")
-    if not say_bin:
-        raise RuntimeError("No TTS backend available (Gemini audio failed and macOS 'say' not found).")
-
-    aiff_path = out_wav.with_suffix(".aiff")
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-
-    def _run() -> None:
-        # Try a pleasant voice; fall back to default system voice if not installed
-        res = subprocess.run(
-            [say_bin, "-v", "Samantha", "-r", "172", "-o", str(aiff_path), script],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        if res.returncode != 0:
-            subprocess.run(
-                [say_bin, "-r", "172", "-o", str(aiff_path), script],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        subprocess.run(
-            [ffmpeg, "-y", "-i", str(aiff_path), "-ar", "44100", "-ac", "1", str(out_wav)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        aiff_path.unlink(missing_ok=True)
-
-    await asyncio.to_thread(_run)
-    return out_wav
+def _generate_local_tts(script: str, out_wav: Path) -> None:
+    if say := shutil.which("say"):
+        cmd = [
+            say, "-r", "150", "--file-format=WAVE", "--data-format=LEI16@24000",
+            "-o", str(out_wav),
+        ]
+    elif espeak := shutil.which("espeak-ng") or shutil.which("espeak"):
+        cmd = [espeak, "-s", "150", "-w", str(out_wav), "--stdin"]
+    else:
+        raise RuntimeError("Local narration requires macOS say or eSpeak.")
+    # stdin keeps the transcript separate from voice options.
+    subprocess.run(cmd, input=script + "\n", text=True, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.PIPE, check=True, timeout=30)
+    _check_wav(out_wav)
 
 
 async def generate_step_voiceover(
@@ -121,15 +110,24 @@ async def generate_step_voiceover(
     out_wav: Path,
     gemini: Gemini4Client,
     prefer_gemini_audio: bool = True,
+    duration_seconds: int = 6,
 ) -> Path:
-    """
-    Generate spoken voiceover for a build step.
-    Attempts native Gemini Interactions audio first, falling back seamlessly to
-    local TTS so the hackathon demo never blocks or loses voice narration.
-    """
+    """Speak the script verbatim. Publish a WAV only after its audio is usable."""
+    script = script.strip()
+    if not script or duration_seconds < 1:
+        raise ValueError("Narration needs a nonempty script and a positive duration.")
     out_wav.parent.mkdir(parents=True, exist_ok=True)
-    if prefer_gemini_audio:
-        native = await _generate_gemini_audio(script, out_wav, gemini)
-        if native is not None and native.exists() and native.stat().st_size > 1000:
-            return native
-    return await _generate_macos_tts(script, out_wav)
+    with TemporaryDirectory(dir=out_wav.parent) as staging:
+        candidate = Path(staging) / "voice.wav"
+        if prefer_gemini_audio:
+            try:
+                await _generate_gemini_audio(script, candidate, gemini, duration_seconds)
+            except Exception as exc:
+                logger.warning("Gemini narration unavailable (%s); trying local speech.", type(exc).__name__)
+                candidate.unlink(missing_ok=True)
+            else:
+                candidate.replace(out_wav)
+                return out_wav
+        await asyncio.to_thread(_generate_local_tts, script, candidate)
+        candidate.replace(out_wav)
+    return out_wav

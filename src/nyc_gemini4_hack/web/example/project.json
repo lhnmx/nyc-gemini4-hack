@@ -1,0 +1,185 @@
+{
+  "project_id": "paper-glider",
+  "goal": "Fold a paper glider",
+  "is_example": true,
+  "owned_items": [],
+  "status": "completed",
+  "status_message": "This example guide is ready to follow.",
+  "created_at": "2026-11-21T00:00:00Z",
+  "full_video_url": "/static/example/paper-glider.mp4",
+  "plan": {
+    "project_title": "Fold a paper glider",
+    "difficulty": "Beginner",
+    "estimated_time_minutes": 5,
+    "source_youtube_urls": [],
+    "continuity_bible": {
+      "workspace_surface": "Warm, textured worktable",
+      "lighting": "Soft directional studio light",
+      "camera_style": "Overhead folding study with an angled view for the wings",
+      "subject_palette": "Cobalt blue paper on a warm neutral work surface",
+      "hands_description": "Illustrated guide with visible fold lines and animated paper panels"
+    },
+    "materials": [
+      {
+        "id": "paper",
+        "name": "Printer paper",
+        "category": "material",
+        "quantity": "1 sheet · Letter or A4",
+        "required": true,
+        "search_query": "letter or A4 printer paper",
+        "status": "BUY"
+      }
+    ],
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Make the center crease",
+        "instruction_text": "Place one sheet of paper with a short edge at the top. Bring the long edges together, press the fold from top to bottom, and open the sheet again.",
+        "narration_script": "Start with a short edge at the top. Line up the two long edges and press the fold flat. Open the sheet. That center crease will guide the next two folds.",
+        "pov_video_prompt": "An animated cobalt paper sheet demonstrates the fold on a warm worktable. Place one sheet of paper with a short edge at the top. Bring the long edges together, press the fold from top to bottom, and open the sheet again.",
+        "physical_state": {
+          "start_state": "One unfolded sheet of letter-size or A4 paper lies in portrait orientation.",
+          "hand_kinematics": "Hold the aligned corners with one hand. Run a fingertip down the folded edge with the other.",
+          "end_state": "A straight crease divides the open sheet into two long halves.",
+          "verification_cues": [
+            "The two long edges meet when you close the sheet."
+          ]
+        },
+        "tips": [
+          "Start the crease in the middle and smooth toward each end to keep the corners aligned."
+        ],
+        "duration_seconds": 10
+      },
+      {
+        "step_number": 2,
+        "title": "Fold the corners in",
+        "instruction_text": "Bring the top-left corner down to the center crease so the left half of the top edge lies along it. Repeat on the right to form a point.",
+        "narration_script": "Bring the top left corner down until its top edge meets the center crease. Press the diagonal. Do the same on the right. The corners should meet just below the point.",
+        "pov_video_prompt": "An animated cobalt paper sheet demonstrates the fold on a warm worktable. Bring the top-left corner down to the center crease so the left half of the top edge lies along it. Repeat on the right to form a point.",
+        "physical_state": {
+          "start_state": "The sheet is open with the center crease running vertically.",
+          "hand_kinematics": "Pin the top center with a fingertip and swing one corner inward at a time.",
+          "end_state": "Two matching triangular flaps meet along the center line.",
+          "verification_cues": [
+            "The point sits directly above the center crease."
+          ]
+        },
+        "tips": [
+          "A hairline gap between the flaps gives the next layers room to fold."
+        ],
+        "duration_seconds": 11
+      },
+      {
+        "step_number": 3,
+        "title": "Narrow the nose",
+        "instruction_text": "Fold the left sloping edge inward until it lies along the center crease, keeping the tip in place. Fold the right sloping edge in to match.",
+        "narration_script": "Keep the nose still. Bring the left sloping edge all the way in to the center crease. Press from the tip toward the tail. Repeat on the right to make a narrower point.",
+        "pov_video_prompt": "An animated cobalt paper sheet demonstrates the fold on a warm worktable. Fold the left sloping edge inward until it lies along the center crease, keeping the tip in place. Fold the right sloping edge in to match.",
+        "physical_state": {
+          "start_state": "Two diagonal edges meet at the nose.",
+          "hand_kinematics": "Anchor the nose and ease each sloping edge to the center before pressing the new crease.",
+          "end_state": "The front of the sheet forms a long, narrow point.",
+          "verification_cues": [
+            "Both new folds start at the same tip and extend equally far down the sheet."
+          ]
+        },
+        "tips": [
+          "Make small adjustments while the fold is loose. Press sharply only after the edges line up."
+        ],
+        "duration_seconds": 10
+      },
+      {
+        "step_number": 4,
+        "title": "Form the body",
+        "instruction_text": "Fold the entire plane in half along the original center crease. Bring the smooth back halves together so the folded layers face outward.",
+        "narration_script": "Bring the two smooth back halves together along the original center crease. The folded layers should be on the outside. Match the tail corners, then press the long belly fold.",
+        "pov_video_prompt": "An animated cobalt paper sheet demonstrates the fold on a warm worktable. Fold the entire plane in half along the original center crease. Bring the smooth back halves together so the folded layers face outward.",
+        "physical_state": {
+          "start_state": "The narrow nose lies flat with both flaps facing up.",
+          "hand_kinematics": "Lift the sheet at the center and pinch the two backs together. Align both tail corners.",
+          "end_state": "The layers form a slim, doubled body with a long straight belly.",
+          "verification_cues": [
+            "You can see a folded flap on each outside face."
+          ]
+        },
+        "tips": [
+          "Pinch the thick nose gently so its layers stay aligned."
+        ],
+        "duration_seconds": 11
+      },
+      {
+        "step_number": 5,
+        "title": "Open the wings",
+        "instruction_text": "Fold one wing away from the body along a line parallel to the belly, about ¾ inch (2 cm) above it. Match that fold on the other side. Open both wings until they sit nearly level.",
+        "narration_script": "Leave about three quarters of an inch for a grip. Fold one wing away from the body, parallel to the belly. Match the other wing, then open them nearly level. From the tail, both wings should rise just a little.",
+        "pov_video_prompt": "An animated cobalt paper sheet demonstrates the fold on a warm worktable. Fold one wing away from the body along a line parallel to the belly, about ¾ inch (2 cm) above it. Match that fold on the other side. Open both wings until they sit nearly level.",
+        "physical_state": {
+          "start_state": "The folded body is closed and the edges of the two sides line up.",
+          "hand_kinematics": "Fold each side back along matching, parallel lines. Pinch the body and spread the wings.",
+          "end_state": "Two wings extend from the narrow grip under the plane.",
+          "verification_cues": [
+            "Look from the tail. The wingtips are at the same height, just above the roots."
+          ]
+        },
+        "tips": [
+          "Hold the body below the wings and give the plane a gentle, level push into an open space."
+        ],
+        "duration_seconds": 13
+      }
+    ]
+  },
+  "media": {
+    "1": {
+      "step_number": 1,
+      "status": "ready",
+      "keyframe_url": "/static/example/step-1.jpg",
+      "video_url": "/static/example/step-1.mp4",
+      "captions_url": "/static/example/step-1.vtt",
+      "audio_url": "/static/example/step-1.wav",
+      "chapter_start_seconds": 0.0,
+      "duration_seconds": 10.0
+    },
+    "2": {
+      "step_number": 2,
+      "status": "ready",
+      "keyframe_url": "/static/example/step-2.jpg",
+      "video_url": "/static/example/step-2.mp4",
+      "captions_url": "/static/example/step-2.vtt",
+      "audio_url": "/static/example/step-2.wav",
+      "chapter_start_seconds": 10.0,
+      "duration_seconds": 11.0
+    },
+    "3": {
+      "step_number": 3,
+      "status": "ready",
+      "keyframe_url": "/static/example/step-3.jpg",
+      "video_url": "/static/example/step-3.mp4",
+      "captions_url": "/static/example/step-3.vtt",
+      "audio_url": "/static/example/step-3.wav",
+      "chapter_start_seconds": 21.0,
+      "duration_seconds": 10.0
+    },
+    "4": {
+      "step_number": 4,
+      "status": "ready",
+      "keyframe_url": "/static/example/step-4.jpg",
+      "video_url": "/static/example/step-4.mp4",
+      "captions_url": "/static/example/step-4.vtt",
+      "audio_url": "/static/example/step-4.wav",
+      "chapter_start_seconds": 31.0,
+      "duration_seconds": 11.0
+    },
+    "5": {
+      "step_number": 5,
+      "status": "ready",
+      "keyframe_url": "/static/example/step-5.jpg",
+      "video_url": "/static/example/step-5.mp4",
+      "captions_url": "/static/example/step-5.vtt",
+      "audio_url": "/static/example/step-5.wav",
+      "chapter_start_seconds": 42.0,
+      "duration_seconds": 13.0
+    }
+  },
+  "decisions_log": [],
+  "full_captions_url": "/static/example/paper-glider.vtt"
+}

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from pathlib import Path
 
 from google.genai import types
@@ -9,7 +8,16 @@ from google.genai import types
 from nyc_gemini4_hack.gemini_client import Gemini4Client
 from nyc_gemini4_hack.models import BuildStep, VisualContinuityBible
 
-logger = logging.getLogger(__name__)
+
+def _image_format(data: bytes) -> tuple[str, str]:
+    # Older projects saved every frame as .jpg, including PNG responses.
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", ".jpg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp", ".webp"
+    raise ValueError("Unrecognized POV image format. Expected a PNG, JPEG, or WebP frame.")
 
 
 async def _generate_pov_frame(
@@ -18,49 +26,48 @@ async def _generate_pov_frame(
     gemini: Gemini4Client,
     reference_image_path: Path | None = None,
 ) -> Path:
-    """
-    Generate a single photorealistic first-person POV frame using Gemini image generation
-    (gemini-3.1-flash-image), optionally conditioned on the previous frame for strict
-    workbench, lighting, hands, and clay geometry continuity.
-    """
-    model = gemini.settings.pov_image_model
-    contents: list[object] = []
-
-    if reference_image_path is not None and reference_image_path.exists():
+    """Generate one still, preserving the previous frame's physical arrangement."""
+    contents = []
+    if reference_image_path is not None:
         ref_bytes = reference_image_path.read_bytes()
-        contents.append(
-            types.Part.from_bytes(data=ref_bytes, mime_type="image/jpeg")
+        mime_type, _ = _image_format(ref_bytes)
+        contents.append(types.Part.from_bytes(data=ref_bytes, mime_type=mime_type))
+        prompt = (
+            "The attached image is the preceding moment. Match its viewpoint, lighting, "
+            "hand appearance, object scale, and placement of untouched pieces. "
+            "Advance only the change described for this moment.\n" + prompt
         )
-        contents.append(
-            "CONTINUITY REFERENCE IMAGE ABOVE: Keep the exact same cutting mat, camera angle "
-            "(first-person POV looking down at 45 degrees), lighting, hand appearance, and clay color/scale "
-            "from the reference image, progressing naturally to the next moment described below.\n\n"
-            + prompt
-        )
-    else:
-        contents.append(prompt)
+    contents.append(prompt)
 
-    def _call() -> object:
-        return gemini.client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE"],
-            ),
-        )
+    model = gemini.settings.pov_image_model
+    response = await asyncio.to_thread(
+        gemini.client.models.generate_content,
+        model=model,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            response_modalities=["IMAGE"], image_config=types.ImageConfig(aspect_ratio="16:9")
+        ),
+    )
+    for candidate in response.candidates or []:
+        if candidate.content is None:
+            continue
+        for part in candidate.content.parts or []:
+            inline = part.inline_data
+            if part.thought or inline is None or not inline.data:
+                continue
+            if inline.mime_type and not inline.mime_type.lower().startswith("image/"):
+                continue
+            try:
+                _, suffix = _image_format(inline.data)
+            except ValueError:
+                # Other response parts may still contain a usable final frame.
+                continue
+            frame_path = out_path.with_suffix(suffix)
+            frame_path.parent.mkdir(parents=True, exist_ok=True)
+            frame_path.write_bytes(inline.data)
+            return frame_path
 
-    response = await asyncio.to_thread(_call)
-    candidates = getattr(response, "candidates", None) or []
-    for cand in candidates:
-        parts = getattr(cand.content, "parts", None) or []
-        for part in parts:
-            inline = getattr(part, "inline_data", None)
-            if inline is not None and getattr(inline, "data", None):
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_bytes(inline.data)
-                return out_path
-
-    raise RuntimeError(f"Model {model} returned no image bytes for prompt: {prompt[:120]}")
+    raise RuntimeError(f"Image model {model} returned no final POV image.")
 
 
 async def generate_step_pov_frames(
@@ -70,63 +77,44 @@ async def generate_step_pov_frames(
     gemini: Gemini4Client,
     prev_step_end_frame: Path | None = None,
 ) -> list[Path]:
-    """
-    Generate a 3-frame continuity-chained POV motion sequence (Start -> Action -> End)
-    for a single build step so the resulting video shows smooth physical progression.
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    style_header = (
-        f"Photorealistic 16:9 first-person POV craft photography. "
-        f"Camera: {bible.camera_style}. "
-        f"Surface: {bible.workspace_surface}. "
-        f"Lighting: {bible.lighting}. "
-        f"Palette: {bible.subject_palette}. "
-        f"Hands: {bible.hands_description}. "
-        "No text, no watermarks, no split screen."
+    """Render the setup, point of contact, and inspectable result of one step."""
+    style = (
+        "Create one photorealistic landscape still from the maker's point of view. "
+        "Frame the workpiece and the area being demonstrated together. Keep the camera fixed. "
+        "Exclude captions, diagrams, watermarks and panels.\n"
+        f"Camera: {bible.camera_style}. Surface: {bible.workspace_surface}. "
+        f"Light: {bible.lighting}. Palette: {bible.subject_palette}. Hands: {bible.hands_description}.\n"
+        f"Step {step.step_number}, {step.title}.\n"
     )
+    state = step.physical_state
+    setup = (
+        "Show the instant before the action begins. Preserve completed work from earlier steps.\n"
+        f"Starting arrangement: {state.start_state}"
+    )
+    action = (
+        "Show one instant during the technique. For a hands-on action, show the working grip, "
+        "support and contact point. For a resting or drying interval, show the piece undisturbed. "
+        "Keep the change in progress visible before it reaches the final state.\n"
+        f"Starting arrangement: {state.start_state}\n"
+        f"Technique: {state.hand_kinematics}\n"
+        f"Action detail: {step.pov_video_prompt}"
+    )
+    result = (
+        "Show the work immediately after this action, with its distinguishing features clearly visible. "
+        "Keep tools and hands in physically plausible positions.\n"
+        f"Result: {state.end_state}"
+    )
+    if state.verification_cues:
+        result += "\nVisible evidence of completion: " + "; ".join(state.verification_cues)
 
-    start_path = out_dir / f"step_{step.step_number:02d}_1_start.jpg"
-    mid_path = out_dir / f"step_{step.step_number:02d}_2_action.jpg"
-    end_path = out_dir / f"step_{step.step_number:02d}_3_end.jpg"
-
-    # Frame 1: Start state (chained from previous step's End frame if available)
-    start_prompt = (
-        f"{style_header}\n"
-        f"MOMENT: Beginning of Step {step.step_number} ({step.title}).\n"
-        f"SCENE STATE: {step.physical_state.start_state}"
-    )
-    await _generate_pov_frame(
-        prompt=start_prompt,
-        out_path=start_path,
-        gemini=gemini,
-        reference_image_path=prev_step_end_frame,
-    )
-
-    # Frame 2: Mid-action hands performing the physical technique
-    mid_prompt = (
-        f"{style_header}\n"
-        f"MOMENT: Mid-action during Step {step.step_number} ({step.title}).\n"
-        f"HAND KINEMATICS: {step.physical_state.hand_kinematics}\n"
-        f"ACTION DETAIL: {step.pov_video_prompt}"
-    )
-    await _generate_pov_frame(
-        prompt=mid_prompt,
-        out_path=mid_path,
-        gemini=gemini,
-        reference_image_path=start_path,
-    )
-
-    # Frame 3: Completed End state of this step
-    end_prompt = (
-        f"{style_header}\n"
-        f"MOMENT: Completed result of Step {step.step_number} ({step.title}).\n"
-        f"END STATE: {step.physical_state.end_state}"
-    )
-    await _generate_pov_frame(
-        prompt=end_prompt,
-        out_path=end_path,
-        gemini=gemini,
-        reference_image_path=mid_path,
-    )
-
-    return [start_path, mid_path, end_path]
+    frames = []
+    reference = prev_step_end_frame
+    for label, moment in (("1_start", setup), ("2_action", action), ("3_end", result)):
+        reference = await _generate_pov_frame(
+            prompt=style + moment,
+            out_path=out_dir / f"step_{step.step_number:02d}_{label}",
+            gemini=gemini,
+            reference_image_path=reference,
+        )
+        frames.append(reference)
+    return frames

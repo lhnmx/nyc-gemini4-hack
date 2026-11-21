@@ -27,11 +27,13 @@ class Settings(BaseSettings):
     gemini_model_hydrogen: str = Field(default="gemini-4-hydrogen")
     gemini_decisions_enabled: bool = Field(default=True)
     gemini_decisions_model: str = Field(default="gemini-decision-1")
-    gemini_decisions_api_version: str = Field(default="v1alpha")
+    gemini_decisions_api_version: str = Field(default="v1beta")
 
     # Media Generation (POV Keyframes / Video / Voice)
+    pov_media_mode: Literal["motion", "illustrated_frames"] = "motion"
+    pov_video_model: str = Field(default="gemini-omni-1.2-flash")
     pov_image_model: str = Field(default="gemini-3.1-flash-image")
-    audio_model: str = Field(default="gemini-omni-flash-preview")
+    audio_model: str = Field(default="gemini-3.8-flash-tts")
     veo_model: str = Field(default="veo-3.0-generate-preview")
     imagen_model: str = Field(default="imagen-3.0-generate-002")
     tts_voice: str = Field(default="Aoede")
@@ -48,6 +50,7 @@ class Settings(BaseSettings):
     app_host: str = Field(default="0.0.0.0")
     app_port: int = Field(default=8000)
     media_output_dir: Path = Field(default=Path("./outputs"))
+    sqlite_path: Path = Field(default=Path("./data/craftpov.sqlite3"))
 
     def model_for(self, role: ModelRole) -> str:
         mapping: dict[ModelRole, str] = {
@@ -68,12 +71,21 @@ class Settings(BaseSettings):
             "youtube_configured": bool(self.youtube_api_key.strip()),
             "shopify_mcp_configured": bool(self.shopify_mcp_url.strip()),
             "decisions_api_enabled": self.gemini_decisions_enabled,
+            "capabilities": {
+                "media_mode": self.pov_media_mode,
+                "commerce": False,
+                "live_coach": False,
+                "desk_inventory": False,
+            },
             "models": {
                 "argon": self.gemini_model_argon,
                 "carbon": self.gemini_model_carbon,
                 "neon": self.gemini_model_neon,
                 "hydrogen": self.gemini_model_hydrogen,
                 "decisions": self.gemini_decisions_model,
+                "video": self.pov_video_model,
+                "image": self.pov_image_model,
+                "audio": self.audio_model,
                 "veo": self.veo_model,
                 "imagen": self.imagen_model,
             },

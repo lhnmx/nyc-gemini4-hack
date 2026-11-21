@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ProjectStatus(StrEnum):
@@ -13,7 +13,12 @@ class ProjectStatus(StrEnum):
     PLANNING = "planning"
     GENERATING = "generating"
     COMPLETED = "completed"
+    PARTIAL = "partial"
     FAILED = "failed"
+
+    @property
+    def terminal(self) -> bool:
+        return self in {self.COMPLETED, self.PARTIAL, self.FAILED}
 
 
 class MaterialStatus(StrEnum):
@@ -71,6 +76,13 @@ class MaterialItem(BaseModel):
     status: MaterialStatus = MaterialStatus.BUY
     substitute_note: str | None = None
 
+    @field_validator("id")
+    @classmethod
+    def material_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Every material needs an ID.")
+        return value.strip()
+
 
 class VisualContinuityBible(BaseModel):
     workspace_surface: str
@@ -88,14 +100,21 @@ class PhysicalStateTransition(BaseModel):
 
 
 class BuildStep(BaseModel):
-    step_number: int
+    step_number: int = Field(ge=1)
     title: str
     instruction_text: str
     narration_script: str
     pov_video_prompt: str
     physical_state: PhysicalStateTransition
     tips: list[str] = Field(default_factory=list)
-    duration_seconds: int = 6
+    duration_seconds: int = Field(default=6, ge=1)
+
+    @field_validator("narration_script")
+    @classmethod
+    def spoken_instruction(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Every step needs a narration script.")
+        return value.strip()
 
 
 class BuildPlan(BaseModel):
@@ -105,7 +124,21 @@ class BuildPlan(BaseModel):
     source_youtube_urls: list[str] = Field(default_factory=list)
     continuity_bible: VisualContinuityBible
     materials: list[MaterialItem] = Field(default_factory=list)
-    steps: list[BuildStep] = Field(default_factory=list)
+    steps: list[BuildStep] = Field(min_length=1)
+
+    @field_validator("materials")
+    @classmethod
+    def distinct_materials(cls, materials: list[MaterialItem]) -> list[MaterialItem]:
+        if len({material.id for material in materials}) != len(materials):
+            raise ValueError("Every material needs a unique ID.")
+        return materials
+
+    @field_validator("steps")
+    @classmethod
+    def distinct_steps(cls, steps: list[BuildStep]) -> list[BuildStep]:
+        if len({step.step_number for step in steps}) != len(steps):
+            raise ValueError("Every build step needs a unique step number.")
+        return steps
 
 
 class CartLineItem(BaseModel):
@@ -128,10 +161,14 @@ class ShoppingCartProposal(BaseModel):
 
 class StepMediaAsset(BaseModel):
     step_number: int
-    status: str = "pending"  # "pending" | "generating" | "ready" | "error"
+    status: str = "pending"  # pending, generating, ready, error or skipped
+    media_mode: Literal["motion", "illustrated_frames"] | None = None
     keyframe_url: str | None = None
     video_url: str | None = None
     audio_url: str | None = None
+    captions_url: str | None = None
+    duration_seconds: float | None = Field(default=None, gt=0)
+    chapter_start_seconds: float | None = Field(default=None, ge=0)
     error: str | None = None
 
 
@@ -150,7 +187,7 @@ class ProjectEvent(BaseModel):
 
 
 class ProjectState(BaseModel):
-    project_id: str
+    project_id: str = Field(pattern=r"^[a-zA-Z0-9_-]+$")
     goal: str
     owned_items: list[str] = Field(default_factory=list)
     desk_photo_url: str | None = None
@@ -159,6 +196,8 @@ class ProjectState(BaseModel):
     plan: BuildPlan | None = None
     cart: ShoppingCartProposal | None = None
     media: dict[int, StepMediaAsset] = Field(default_factory=dict)
+    full_video_url: str | None = None
+    full_captions_url: str | None = None
     decisions_log: list[DecisionResult] = Field(default_factory=list)
     error: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())

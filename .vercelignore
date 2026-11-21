@@ -1,0 +1,17 @@
+.env
+.env.*
+.venv
+.git
+.vercel
+.pytest_cache
+**/__pycache__
+**/node_modules
+outputs
+data
+tests
+frontend/tests
+frontend/dist
+frontend/public/static/example
+frontend/public/ucp-agent-profile.json
+*.egg-info
+**/.DS_Store

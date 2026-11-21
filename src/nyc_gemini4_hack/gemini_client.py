@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-from typing import Any, Mapping, Sequence, TypeVar
+from collections.abc import Mapping
+from typing import Any, TypeVar
 
 from google import genai
 from google.genai import types
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nyc_gemini4_hack.config import ModelRole, Settings, get_settings
 from nyc_gemini4_hack.models import DecisionResult
@@ -18,7 +17,7 @@ T = TypeVar("T", bound=BaseModel)
 
 class _DecisionPayload(BaseModel):
     choice: str
-    confidence: float
+    confidence: float = Field(ge=0, le=1)
     rationale: str
 
 
@@ -42,6 +41,14 @@ class Gemini4Client:
     def model_id(self, role: ModelRole) -> str:
         return self.settings.model_for(role)
 
+    async def aclose(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            try:
+                await client.aio.aclose()
+            finally:
+                client.close()
+
     async def generate_text(
         self,
         role: ModelRole,
@@ -54,8 +61,7 @@ class Gemini4Client:
             system_instruction=system_instruction,
             temperature=temperature,
         )
-        response = await asyncio.to_thread(
-            self.client.models.generate_content,
+        response = await self.client.aio.models.generate_content(
             model=model,
             contents=contents,
             config=config,
@@ -77,16 +83,16 @@ class Gemini4Client:
             response_mime_type="application/json",
             response_schema=response_schema,
         )
-        response = await asyncio.to_thread(
-            self.client.models.generate_content,
+        response = await self.client.aio.models.generate_content(
             model=model,
             contents=contents,
             config=config,
         )
-        if getattr(response, "parsed", None) is not None:
-            return response.parsed  # type: ignore[return-value]
-        raw_text = response.text or "{}"
-        return response_schema.model_validate(json.loads(raw_text))
+        if response.parsed is not None:
+            return response_schema.model_validate(response.parsed)
+        if not response.text:
+            raise ValueError(f"{model} returned no structured output.")
+        return response_schema.model_validate_json(response.text)
 
     async def decide(
         self,
@@ -119,8 +125,11 @@ class Gemini4Client:
         """
         model = self.model_id(role)
         decisions_model = self.settings.gemini_decisions_model
+        if not questions:
+            return {}
+        results: dict[str, DecisionResult] = {}
 
-        if self.settings.gemini_decisions_enabled and hasattr(self.client, "decisions"):
+        if self.settings.gemini_decisions_enabled and hasattr(self.client.aio, "decisions"):
             try:
                 api_questions = {
                     q_id: {
@@ -130,54 +139,45 @@ class Gemini4Client:
                     }
                     for q_id, (instr, crit) in questions.items()
                 }
-                resp = await asyncio.to_thread(
-                    self.client.decisions.create,
+                resp = await self.client.aio.decisions.create(
                     model=decisions_model,
                     api_version=self.settings.gemini_decisions_api_version,
                     input=context,
                     questions=api_questions,
                 )
-                out: dict[str, DecisionResult] = {}
-                answers = resp.answers or {}
-                for q_id, (_, crit) in questions.items():
-                    ans = answers.get(q_id)
-                    if ans is not None and hasattr(ans, "choice"):
-                        probs = getattr(ans, "probabilities", {}) or {}
-                        prob_summary = ", ".join(
-                            f"{k}={v:.2f}" for k, v in sorted(probs.items(), key=lambda x: -x[1])
-                        )
-                        out[q_id] = DecisionResult(
-                            gate_name=q_id,
-                            choice=str(ans.choice),
-                            confidence=float(getattr(ans, "confidence", 1.0)),
-                            rationale=f"Decisions API calibrated probs: {prob_summary}"
-                            if prob_summary
-                            else "Decisions API choice",
-                            model_used=decisions_model,
-                            via_decisions_api=True,
-                        )
-                    else:
-                        first_opt = next(iter(crit.keys()))
-                        out[q_id] = DecisionResult(
-                            gate_name=q_id,
-                            choice=first_opt,
-                            confidence=0.5,
-                            rationale="Decisions API returned no answer; defaulted.",
-                            model_used=decisions_model,
-                            via_decisions_api=True,
-                        )
-                return out
             except Exception as exc:
                 logger.warning(
                     "Native Decisions API (%s) failed (%s); falling back to structured %s.",
                     decisions_model,
-                    exc,
+                    type(exc).__name__,
                     model,
                 )
+            else:
+                if getattr(getattr(resp, "prompt_feedback", None), "block_reason", None):
+                    raise ValueError("The decision provider declined this input.")
+                answers = getattr(resp, "answers", None) or {}
+                for q_id, (_, criteria) in questions.items():
+                    answer = answers.get(q_id)
+                    if (
+                        answer is None or answer.type != "choice"
+                        or answer.choice not in criteria or not 0 <= answer.confidence <= 1
+                    ):
+                        continue
+                    probabilities = getattr(answer, "probabilities", None) or {}
+                    breakdown = ", ".join(
+                        f"{option}={prob:.2f}" for option, prob in probabilities.items()
+                    )
+                    results[q_id] = DecisionResult(
+                        gate_name=q_id, choice=answer.choice, confidence=answer.confidence,
+                        rationale=f"Decisions API probabilities: {breakdown}" if breakdown else "Decisions API choice",
+                        model_used=decisions_model,
+                        via_decisions_api=True,
+                    )
 
-        # Fallback: structured constrained classification on Gemini 4 Neon
-        out_fallback: dict[str, DecisionResult] = {}
+        # Reclassify only questions that the native call did not validly answer.
         for q_id, (instr, crit) in questions.items():
+            if q_id in results:
+                continue
             option_list = list(crit.keys())
             sys_instr = (
                 "You are a deterministic decision gate. "
@@ -191,13 +191,14 @@ class Gemini4Client:
                 system_instruction=sys_instr,
                 temperature=0.0,
             )
-            choice = payload.choice if payload.choice in option_list else option_list[0]
-            out_fallback[q_id] = DecisionResult(
+            if payload.choice not in crit:
+                raise ValueError(f"The decision model returned an unknown choice for {q_id}.")
+            results[q_id] = DecisionResult(
                 gate_name=q_id,
-                choice=choice,
-                confidence=max(0.0, min(1.0, payload.confidence)),
+                choice=payload.choice,
+                confidence=payload.confidence,
                 rationale=payload.rationale,
                 model_used=model,
                 via_decisions_api=False,
             )
-        return out_fallback
+        return results

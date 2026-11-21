@@ -40,7 +40,7 @@ async def synthesize_build_plan(
          and first-person POV video prompts across every step.
     """
     extracts_json = json.dumps([e.model_dump() for e in extracts], indent=2)
-    owned_str = ", ".join(owned_items) if owned_items else "none specified"
+    owned_str = json.dumps(owned_items, ensure_ascii=False)
 
     # Stage 1: Gemini 4 Argon — Deep physical synthesis & BOM
     argon_system = (
@@ -57,11 +57,16 @@ async def synthesize_build_plan(
         "- source_youtube_urls: list of the source URLs used.\n"
         "- materials: deduplicated Bill of Materials with short unique ids (e.g. 'mat_1'), "
         "clean Shopify-friendly search_query strings (e.g. 'double sided origami paper'), "
-        "and status='OWNED_EXACT' if clearly covered by the user's owned list, else 'BUY'.\n"
-        "- steps: 5 to 7 atomic steps. For each step:\n"
-        "  * narration_script: crisp, warm spoken instruction (~12–18 words, fits a 6-second POV clip).\n"
-        "  * instruction_text: 1–2 sentences of clear written guidance.\n"
-        "  * pov_video_prompt: first-person over-the-hands POV description.\n"
+        "and a material name that matches the user's wording when it names the same item.\n"
+        "- steps: order the dependencies and number the steps consecutively from 1. For each step:\n"
+        "  * narration_script: what the maker should hear while watching. Start with the action verb, "
+        "name its target, then give one concrete cue for when to stop. Aim for 10–14 spoken words "
+        "in a six-second clip. Use everyday speech, including units spoken in full. Omit greetings, "
+        "step numbers, camera directions and performance notes. Example: "
+        "'Fold the bottom corner up until the two edges meet.'\n"
+        "  * instruction_text: give the full instruction, including real waiting times, measurements "
+        "and any necessary precautions; keep these intact even when the narration is shorter.\n"
+        "  * pov_video_prompt: describe one visible action from the maker's viewpoint.\n"
         "  * physical_state: start_state, hand_kinematics, end_state, verification_cues.\n"
         "  * duration_seconds: 6."
     )
@@ -74,35 +79,36 @@ async def synthesize_build_plan(
         temperature=0.25,
     )
 
-    # Ensure source URLs are preserved
-    if not plan.source_youtube_urls:
-        plan.source_youtube_urls = [e.url for e in extracts]
-
-    # Normalize owned status for explicit text matches
-    owned_lower = [o.lower() for o in owned_items]
+    # Source links and inventory come from the actual inputs, independently of model guesses.
+    source_urls = list(dict.fromkeys(extract.url for extract in extracts))
+    cited = dict.fromkeys(plan.source_youtube_urls)
+    plan.source_youtube_urls = [url for url in cited if url in source_urls] or source_urls
+    owned_names = {" ".join(item.casefold().split()) for item in owned_items if item.strip()}
     for mat in plan.materials:
-        if any(o in mat.name.lower() or mat.name.lower() in o for o in owned_lower):
-            mat.status = MaterialStatus.OWNED_EXACT
+        name = " ".join(mat.name.casefold().split())
+        mat.status = MaterialStatus.OWNED_EXACT if name in owned_names else MaterialStatus.BUY
+        mat.substitute_note = None
 
     # Stage 2: Gemini 4 Hydrogen — World-model physical state & POV continuity grounding
     hydrogen_system = (
-        "You are a physical world-model and spatial continuity specialist (Gemini 4 Hydrogen). "
-        "Your job is to ensure that a sequence of first-person (POV) video generation prompts "
-        "looks like ONE continuous real-world shoot with zero visual or physical drift: "
-        "Step N's start_state MUST physically match Step N-1's end_state, hand kinematics must be "
-        "anatomically and physically plausible, and every pov_video_prompt must embed the exact "
-        "workspace surface, lighting, camera tilt, and subject palette."
+        "You direct a first-person craft tutorial filmed from one fixed position. "
+        "Plan each chapter of one continuous tutorial film. Show the initial setup, hand or tool contact in motion, and the resulting state. "
+        "Keep material, part count, scale, orientation, and completed work consistent across frames. "
+        "Keep elapsed real-world processes such as drying or cooling explicit in the state descriptions."
     )
     hydrogen_prompt = (
         f"Refine the VisualContinuityBible and every step's PhysicalStateTransition + pov_video_prompt "
         f"for this BuildPlan:\n\n{plan.model_dump_json(indent=2)}\n\n"
         "Rules:\n"
-        "1. Lock workspace_surface, lighting, camera_style ('First-person POV looking down at 45 degrees...'), "
-        "subject_palette, and hands_description.\n"
-        "2. For every step_number, verify Step i start_state seamlessly continues Step i-1 end_state.\n"
-        "3. Write vivid, concrete hand_kinematics (finger grip, motion path, pressure).\n"
-        "4. Include 2–3 concrete visual verification_cues per step that a webcam check-in can inspect.\n"
-        "5. Write each pov_video_prompt as a self-contained first-person POV video prompt."
+        "1. Put the stable surface, lighting, eye-line, palette and hand appearance in continuity_bible. "
+        "Choose a view that keeps the working area visible for this craft.\n"
+        "2. Return one update per existing step_number in plan order. Carry the previous end_state "
+        "into the next start_state, accounting for any required waiting period.\n"
+        "3. In hand_kinematics, identify what steadies the work, where the active hand or tool "
+        "makes contact, and its direction and pressure when relevant. For drying or cooling, leave the work undisturbed and make the elapsed time explicit.\n"
+        "4. Give 2–3 visible verification_cues for the result, such as edge alignment or outline.\n"
+        "5. Write pov_video_prompt as a short visual description of the single observable action. "
+        "Keep the same camera position and show only this step’s tools and parts."
     )
 
     grounded = await gemini.generate_structured(
@@ -113,12 +119,15 @@ async def synthesize_build_plan(
         temperature=0.15,
     )
 
-    plan.continuity_bible = grounded.continuity_bible
     updates_by_num = {s.step_number: s for s in grounded.steps}
+    expected = {step.step_number for step in plan.steps}
+    if len(grounded.steps) != len(expected) or updates_by_num.keys() != expected:
+        raise ValueError("Grounding must provide exactly one physical transition per planned step.")
+
+    plan.continuity_bible = grounded.continuity_bible
     for step in plan.steps:
-        upd = updates_by_num.get(step.step_number)
-        if upd is not None:
-            step.pov_video_prompt = upd.pov_video_prompt
-            step.physical_state = upd.physical_state
+        update = updates_by_num[step.step_number]
+        step.pov_video_prompt = update.pov_video_prompt
+        step.physical_state = update.physical_state
 
     return plan

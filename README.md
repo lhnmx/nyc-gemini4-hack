@@ -1,16 +1,16 @@
 # CraftPOV 🛠️🎥
 
-> **Learn to make anything with your hands — powered by Gemini 4 (Argon, Carbon, Neon & Hydrogen), the Decisions API, POV media generation, and Shopify (`shop.dev`) MCP.**
+> **A maker’s workbench for narrated, chaptered films based on real craft tutorials.**
 >
 > *Built for the Google DeepMind NYC Gemini 4 Hackathon:*
 > - **Track:** Problem Statement Two — **Element 119** *(Multimodal In → Multimodal Out)*
 > - **Bonus Track:** **Build with Commerce (Shopify / `shop.dev`)**
 
-CraftPOV turns any live physical-world goal (e.g., *"Fold a Himmel und Hölle origami paper fortune teller"*, *"solder a custom macro pad"*, *"make a leather cardholder"*) into a physically grounded, first-person (**POV**) video + voice guide synthesized directly from raw YouTube video/audio streams — and uses a **Shopify (`shop.dev`)** shopping agent to source any tools or materials missing from your desk.
+Enter a craft goal such as “Fold a Himmel und Hölle origami paper fortune teller” and the supplies you already have. CraftPOV researches YouTube tutorials and shows the written instructions and materials checklist as soon as the plan is ready. The finished guide plays in one narrated film. Choose a chapter to replay a step, or let the written instructions follow playback. Your chapter and checklist are saved in the browser tab.
 
----
+## Hackathon design goals
 
-## 🎯 Alignment with Hackathon Tracks
+The following track descriptions, model roles, diagrams and proposed file structure describe the target design. The running app uses Gemini Omni for motion and Gemini TTS for narration. Shopify checkout, desk inventory and live camera coaching remain planned. The upstream Shopify UCP profile is served at `/ucp-agent-profile.json`. The implementation status and current API are documented in [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ### Problem Statement Two: Element 119
 CraftPOV **only works** because Gemini 4 can see, hear, decide, and generate media natively — on **unscripted, live inputs** (arbitrary YouTube footage, messy desk photos, and live webcam progress checks):
@@ -41,7 +41,7 @@ CraftPOV routes each stage of the pipeline to the Gemini 4 model best suited for
 
 ---
 
-## 🔄 How It Works
+## 🔄 Target workflow
 
 ```mermaid
 flowchart LR
@@ -64,7 +64,7 @@ flowchart LR
 
 ---
 
-## 🧱 Tech Stack
+## 🧱 Target tech stack
 
 | Layer | Technology |
 | :--- | :--- |
@@ -75,7 +75,7 @@ flowchart LR
 | **Commerce Integration** | Shopify Storefront MCP (`search_shop_catalog`, `update_cart`, `get_cart`) |
 | **YouTube Discovery** | YouTube Data API v3 |
 | **Media Processing** | FFmpeg (audio/video muxing, captions, frame extraction, stitching) |
-| **API & UI** | FastAPI (SSE progress streaming) + interactive Web UI |
+| **API & UI** | FastAPI (SSE progress streaming), React 19 and Vite 8 |
 
 ---
 
@@ -108,38 +108,38 @@ nyc-gemini4-hack/
 
 ## 🚀 Getting Started
 
-### Prerequisites
-- Python `>=3.14` and [`uv`](https://docs.astral.sh/uv/)
-- `ffmpeg` installed on your system (`brew install ffmpeg`)
-- API keys & endpoints:
-  - `GEMINI_API_KEY` (with access to Gemini 4 Argon, Carbon, Neon, Hydrogen + Veo)
-  - `YOUTUBE_API_KEY` (YouTube Data API v3)
-  - `SHOPIFY_MCP_URL` (e.g., `https://<your-store>.myshopify.com/api/mcp`)
-
-### Setup
+The server uses Python 3.14 and the project's locked dependencies. Fill in the Gemini and YouTube API keys and set the model IDs to those enabled for your account. The image and speech settings are `POV_IMAGE_MODEL`, `AUDIO_MODEL` and `TTS_VOICE`. FFmpeg ships with the Python dependency. On macOS, system speech can supply narration if cloud speech is unavailable. Linux supports eSpeak when installed.
 
 ```bash
-# Install dependencies
-uv sync
-
-# Configure environment & Gemini 4 model IDs
+uv sync --locked
+npm --prefix frontend ci
+npm --prefix frontend run build
 cp .env.example .env
-# Fill in GEMINI_API_KEY, GEMINI_MODEL_ARGON, GEMINI_MODEL_CARBON,
-# GEMINI_MODEL_NEON, GEMINI_MODEL_HYDROGEN, YOUTUBE_API_KEY, SHOPIFY_MCP_URL
-
-# Run the CLI / server (once implemented)
+# Fill in the keys and model IDs, then start the web workbench.
 uv run nyc-gemini4-hack
 ```
+
+Open [the local workbench](http://localhost:8000). The server saves job progress and project links in SQLite at `SQLITE_PATH` and writes rendered files under `MEDIA_OUTPUT_DIR`. The CLI also saves the plan and state to JSON for later rendering.
+
+Vercel hosts the workbench on its CDN, FastAPI in a Python Function, and the renderer in a Daemon. Turso hosts the shared SQLite database, and Vercel Blob serves the generated media. [Deployment instructions](DEPLOYMENT.md)
+
+```bash
+uv run python -m nyc_gemini4_hack.cli "Fold a paper glider" --owned "paper" --skip-media
+uv run python -m nyc_gemini4_hack.cli --from-json outputs/PROJECT_ID/project_state.json
+```
+
+Run the Python tests with `uv run python -m unittest discover -s tests`. They use offline provider responses and render real MP4 files. From `frontend/`, run `npm ci`, `npx playwright install chromium` and `npm test` to build the workbench and run its browser tests.
 
 ---
 
 ## 🗺️ Hackathon Build Plan
 
 - [x] Project scaffolding & architecture design
-- [ ] **Milestone 1 — Research & Physical Plan (`Carbon` + `Argon` + `Hydrogen`)**: YouTube search + multimodal video analysis → structured `BuildPlan`, Physical State Graph & BOM
+- [x] **Milestone 1 — Research & Physical Plan (`Carbon` + `Argon` + `Hydrogen`)**: YouTube search + multimodal video analysis → structured `BuildPlan`, Physical State Graph & BOM
 - [ ] **Milestone 2 — Shopify MCP Commerce (`Neon`)**: Desk-photo/list diffing + live Shopify MCP catalog search & checkout URL generation
-- [ ] **Milestone 3 — POV Media Pipeline**: Continuity-chained keyframes + Veo POV clips + voiceover muxing
-- [ ] **Milestone 4 — Interactive Demo UI**: Step-by-step loopable POV player with material checklist, checkout button & SSE progress stream
+- [x] **Milestone 3 — Illustrated POV media**: Chained setup, action and result frames with spoken narration and FFmpeg assembly
+- [x] Gemini Omni motion synthesis and one chaptered film with timed captions
+- [x] **Milestone 4 — Interactive workbench**: Chapter navigation in one film, synchronized written steps, materials checklist and live progress
 - [ ] **Milestone 5 (Wow Factor) — Live Workbench Coach**: Hold your clay figure up to the webcam for real-time visual critique & voice guidance
 
 ---

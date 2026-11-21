@@ -1,18 +1,91 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import subprocess
 import wave
+from dataclasses import dataclass
+from html import escape
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import imageio_ffmpeg
+
+CHAPTER_FPS = 24
 
 
 def _wav_duration_seconds(wav_path: Path) -> float:
     with wave.open(str(wav_path), "rb") as wf:
-        frames = wf.getnframes()
-        rate = wf.getframerate()
-        return frames / float(rate) if rate else 6.0
+        return wf.getnframes() / wf.getframerate()
+
+
+@dataclass(frozen=True)
+class NarratedChapter:
+    video: Path
+    frames: int
+    speech_seconds: float
+    transcript: str
+
+    @property
+    def duration_seconds(self) -> float:
+        return self.frames / CHAPTER_FPS
+
+
+def _vtt_timestamp(milliseconds: int) -> str:
+    seconds, millis = divmod(milliseconds, 1000)
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02}:{minutes:02}:{seconds:02}.{millis:03}"
+
+
+def write_tutorial_captions(chapters: list[NarratedChapter], output: Path) -> list[float]:
+    """Place each spoken instruction on the same frame timeline as the film."""
+    cues = ["WEBVTT\n\n"]
+    starts = []
+    elapsed_frames = 0
+    for chapter in chapters:
+        start = elapsed_frames / CHAPTER_FPS
+        starts.append(start)
+        start_ms = round(start * 1000)
+        end_ms = max(start_ms + 1, round((start + chapter.speech_seconds) * 1000))
+        text = escape(" ".join(chapter.transcript.split()), quote=False)
+        cues.append(f"{_vtt_timestamp(start_ms)} --> {_vtt_timestamp(end_ms)}\n{text}\n\n")
+        elapsed_frames += chapter.frames
+    with TemporaryDirectory(dir=output.parent) as staging:
+        candidate = Path(staging) / output.name
+        candidate.write_text("".join(cues), encoding="utf-8")
+        candidate.replace(output)
+    return starts
+
+
+def caption_chapter(video: Path, voice_wav: Path | None, transcript: str) -> NarratedChapter:
+    """Measure the encoded chapter and time its caption to the recorded narration."""
+    frames, _ = imageio_ffmpeg.count_frames_and_secs(video)
+    if frames < 1:
+        raise ValueError(f"No video frames in {video.name}.")
+    duration = frames / CHAPTER_FPS
+    # Older saved renders can contain just the narrated MP4.
+    speech = min(duration, _wav_duration_seconds(voice_wav)) if voice_wav else duration
+    chapter = NarratedChapter(video, frames, speech, transcript)
+    write_tutorial_captions([chapter], video.with_suffix(".vtt"))
+    return chapter
+
+
+def _render(cmd: list[str], out_mp4: Path) -> None:
+    # Keep the previous playable file intact if an encode fails partway through.
+    with TemporaryDirectory(dir=out_mp4.parent) as staging:
+        output = Path(staging) / "render.mp4"
+        result = subprocess.run(
+            [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-loglevel", "error", "-xerror",
+             *cmd, str(output)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+        )
+        if result.returncode:
+            raise RuntimeError(f"FFmpeg could not produce {out_mp4.name}: {result.stderr.strip()[-1200:]}")
+        output.replace(out_mp4)
 
 
 async def compose_step_pov_video(
@@ -21,130 +94,84 @@ async def compose_step_pov_video(
     out_mp4: Path,
     min_duration: float = 5.5,
 ) -> Path:
-    """
-    Compose 3 continuity-chained POV frames + voiceover WAV into a smooth 1280x720
-    H.264/AAC loopable POV step MP4 with gentle Ken Burns motion and crossfades.
-    """
-    if len(frames) < 1:
+    """Compose a 720p POV clip with crossfades and enough time to hear every word."""
+    if not frames:
         raise ValueError("At least 1 POV frame is required to compose a video.")
 
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    fps = CHAPTER_FPS
+    count = len(frames)
+    duration = max(min_duration, _wav_duration_seconds(voice_wav) + 0.8)
+    total_frames = max(count + 1, math.ceil(duration * fps))
+    fade_frames = max(1, min(round(0.45 * fps), total_frames // (2 * count)))
+    # Count overlapping frames twice when allocating time to each still.
+    base, extra = divmod(total_frames + fade_frames * (count - 1), count)
+    clip_lengths = [base + (idx < extra) for idx in range(count)]
 
-    audio_dur = _wav_duration_seconds(voice_wav)
-    total_dur = max(min_duration, audio_dur + 0.8)
-    n = len(frames)
-    fade_dur = 0.45 if n > 1 else 0.0
-    # Each clip duration so total after (n-1) crossfades equals total_dur
-    clip_dur = (total_dur + fade_dur * (n - 1)) / n
-    fps = 24
-    clip_frames = max(12, int(round(clip_dur * fps)))
-
-    def _run() -> None:
-        cmd: list[str] = [ffmpeg, "-y"]
-        for f in frames:
-            cmd.extend(["-loop", "1", "-t", f"{clip_dur:.2f}", "-i", str(f)])
-        cmd.extend(["-i", str(voice_wav)])
-
-        filter_parts: list[str] = []
-        for idx in range(n):
-            # Subtle POV breathing zoom (1.0 -> 1.05) centered, scaled to 1280x720
-            filter_parts.append(
-                f"[{idx}:v]scale=1600:900:force_original_aspect_ratio=increase,"
-                f"crop=1600:900,"
-                f"zoompan=z='min(zoom+0.0005,1.06)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-                f":d={clip_frames}:s=1280x720:fps={fps},format=yuv420p,setsar=1[v{idx}]"
-            )
-
-        if n == 1:
-            video_out = "[v0]"
-        else:
-            prev_label = "v0"
-            for idx in range(1, n):
-                offset = max(0.1, idx * (clip_dur - fade_dur))
-                out_label = f"xf{idx}"
-                filter_parts.append(
-                    f"[{prev_label}][v{idx}]xfade=transition=fade:duration={fade_dur:.2f}:offset={offset:.2f}[{out_label}]"
-                )
-                prev_label = out_label
-            video_out = f"[{prev_label}]"
-
-        filter_complex = ";".join(filter_parts)
-        audio_idx = n
-
-        cmd.extend(
-            [
-                "-filter_complex",
-                filter_complex,
-                "-map",
-                video_out,
-                "-map",
-                f"{audio_idx}:a",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "22",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "160k",
-                "-movflags",
-                "+faststart",
-                "-t",
-                f"{total_dur:.2f}",
-                str(out_mp4),
-            ]
+    cmd = []
+    filters = []
+    for idx, frame in enumerate(frames):
+        cmd.extend(["-i", str(frame)])
+        # Each input is one still. zoompan emits exactly this many output frames.
+        filters.append(
+            f"[{idx}:v]scale=1600:900:force_original_aspect_ratio=decrease,"
+            "pad=1600:900:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+            "zoompan=z='min(zoom+0.0005,1.04)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+            f":d={clip_lengths[idx]}:s=1280x720:fps={fps},format=yuv420p[v{idx}]"
         )
+    cmd.extend(["-i", str(voice_wav)])
 
-        subprocess.run(
-            cmd,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+    output = "v0"
+    elapsed_frames = clip_lengths[0]
+    for idx in range(1, count):
+        offset = (elapsed_frames - fade_frames) / fps
+        filters.append(
+            f"[{output}][v{idx}]xfade=transition=fade:duration={fade_frames / fps:.8f}"
+            f":offset={offset:.8f}[xf{idx}]"
         )
+        elapsed_frames += clip_lengths[idx] - fade_frames
+        output = f"xf{idx}"
 
-    await asyncio.to_thread(_run)
+    # Every step has the same audio format and a full-length audio stream so a
+    # stitched tutorial preserves the pause and narration onset at each boundary.
+    cmd.extend([
+        "-filter_complex", ";".join(filters), "-map", f"[{output}]", "-map", f"{count}:a",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p",
+        "-af", "apad", "-ar", "48000", "-ac", "1", "-c:a", "aac", "-b:a", "160k",
+        "-movflags", "+faststart", "-t", f"{total_frames / fps:.8f}",
+    ])
+    await asyncio.to_thread(_render, cmd, out_mp4)
     return out_mp4
 
 
-async def stitch_full_tutorial(step_mp4s: list[Path], out_mp4: Path) -> Path:
-    """Concatenate all individual POV step MP4s into one continuous tutorial video."""
+async def stitch_full_tutorial(
+    step_mp4s: list[Path], out_mp4: Path, *, durations: list[float] | None = None,
+) -> Path:
+    """Concatenate the individual POV clips without re-encoding their video."""
     if not step_mp4s:
         raise ValueError("No step MP4s provided to stitch.")
+    if durations is not None and len(durations) != len(step_mp4s):
+        raise ValueError("Each clip needs its measured duration.")
 
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-    concat_file = out_mp4.parent / "concat_list.txt"
-    concat_file.write_text(
-        "\n".join(f"file '{p.resolve()}'" for p in step_mp4s),
-        encoding="utf-8",
-    )
 
     def _run() -> None:
-        subprocess.run(
-            [
-                ffmpeg,
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(concat_file),
-                "-c",
-                "copy",
-                "-movflags",
-                "+faststart",
-                str(out_mp4),
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
+        with TemporaryDirectory(dir=out_mp4.parent) as staging:
+            concat_file = Path(staging) / "clips.ffconcat"
+            lines = []
+            for i, path in enumerate(step_mp4s):
+                escaped = path.resolve().as_posix().replace("'", "'\\''")
+                lines.append(f"file '{escaped}'\n")
+                if durations is not None:
+                    lines.append(f"duration {durations[i]:.9f}\n")
+            concat_file.write_text("".join(lines), encoding="utf-8")
+            # AAC priming packets start before zero. Preserve the video's frame-zero
+            # timestamp and rebuild the audio clock at joins so chapter seeks stay exact.
+            _render([
+                "-copyts", "-f", "concat", "-safe", "0", "-i", str(concat_file),
+                "-c:v", "copy", "-af", "aresample=async=1:first_pts=0",
+                "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
+            ], out_mp4)
 
     await asyncio.to_thread(_run)
     return out_mp4

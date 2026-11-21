@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
+import re
 from dataclasses import dataclass
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 from google.genai import types
@@ -23,6 +26,23 @@ class YouTubeCandidate:
     description: str
 
 
+def _direct_candidate(url: str) -> YouTubeCandidate:
+    parts = urlsplit(url.strip())
+    path = parts.path.strip("/").split("/")
+    video_id = ""
+    if parts.scheme in {"http", "https"}:
+        if parts.hostname in {"youtu.be", "www.youtu.be"} and len(path) == 1:
+            video_id = path[0]
+        elif parts.hostname in {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}:
+            if path == ["watch"]:
+                video_id = parse_qs(parts.query).get("v", [""])[0]
+            elif len(path) == 2 and path[0] in {"shorts", "embed", "live"}:
+                video_id = path[1]
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        raise ValueError("Provide a YouTube video link, such as a watch, Shorts, or youtu.be URL.")
+    return YouTubeCandidate(video_id, f"https://www.youtube.com/watch?v={video_id}", "", "", "")
+
+
 async def search_youtube_tutorials(
     goal: str,
     max_results: int = 5,
@@ -41,12 +61,12 @@ async def search_youtube_tutorials(
         "videoEmbeddable": "true",
         "maxResults": max_results,
         "relevanceLanguage": "en",
-        "key": cfg.youtube_api_key,
     }
     async with httpx.AsyncClient(timeout=20.0) as client:
         resp = await client.get(
             "https://www.googleapis.com/youtube/v3/search",
             params=params,
+            headers={"X-Goog-Api-Key": cfg.youtube_api_key},
         )
         resp.raise_for_status()
         items = resp.json().get("items", [])
@@ -61,9 +81,9 @@ async def search_youtube_tutorials(
             YouTubeCandidate(
                 video_id=vid,
                 url=f"https://www.youtube.com/watch?v={vid}",
-                title=snippet.get("title", ""),
-                channel=snippet.get("channelTitle", ""),
-                description=snippet.get("description", ""),
+                title=html.unescape(snippet.get("title", "")),
+                channel=html.unescape(snippet.get("channelTitle", "")),
+                description=html.unescape(snippet.get("description", "")),
             )
         )
     return candidates
@@ -113,10 +133,6 @@ async def gate_youtube_candidates(
         if res.choice == "KEEP_TUTORIAL":
             kept.append(cand)
 
-    # Guarantee at least 1 candidate if all were borderline
-    if not kept and candidates:
-        kept = candidates[:1]
-
     return kept[:max_keep], decisions
 
 
@@ -132,8 +148,9 @@ async def analyze_youtube_video(
     system_instruction = (
         "You are an expert physical craft & fabrication analyst (Gemini 4 Carbon). "
         "Watch the raw video and listen to the audio carefully. Do NOT rely only on spoken words — "
-        "observe exact hand grips, finger pressure, material proportions, tool swaps, and items visible "
+        "describe observable grips, contact, material proportions, tool swaps, and items visible "
         "on the workbench even if the creator never mentions them verbally (or if the video is silent/non-English). "
+        "Distinguish visible cues from estimates. Omit unsupported details. "
         "Return a structured TutorialExtract JSON."
     )
 
@@ -148,7 +165,7 @@ async def analyze_youtube_video(
         f"Channel: {candidate.channel}\n\n"
         "Analyze this video from start to finish and extract:\n"
         "1. language_or_audio_notes: note if it is silent/ASMR, music-only, non-English, or narrated.\n"
-        "2. extracted_materials: EVERY physical material and tool visible or used (including clay colors, wire, water, sculpting tools, mats, paints).\n"
+        "2. extracted_materials: materials and tools actually used in the demonstrated build.\n"
         "3. segments: chronological timestamped segments (MM:SS) of actual hands-on steps (skip intros/outros/sponsors), detailing technique, exact hand_action, and tools_visible.\n"
         "4. common_mistakes: physical failure modes or tricky spots visible in the build."
     )
@@ -160,12 +177,14 @@ async def analyze_youtube_video(
         system_instruction=system_instruction,
         temperature=0.2,
     )
-    # Ensure metadata fields are always populated accurately
+    if not extract.segments:
+        raise ValueError("The video yielded no hands-on segments.")
+    # Search metadata and the supplied video identity take precedence over model guesses.
     extract.video_id = candidate.video_id
     extract.url = candidate.url
-    if not extract.title:
-        extract.title = candidate.title
-    if not extract.channel:
+    if candidate.title or not extract.title.strip():
+        extract.title = candidate.title or f"YouTube video {candidate.video_id}"
+    if candidate.channel:
         extract.channel = candidate.channel
     return extract
 
@@ -183,17 +202,16 @@ async def research_goal_on_youtube(
     3. Watch selected videos in parallel with Gemini 4 Carbon.
     """
     decisions: list[DecisionResult] = []
+    if max_videos < 1:
+        raise ValueError("The number of videos to analyze must be positive.")
     if direct_urls:
-        selected = [
-            YouTubeCandidate(
-                video_id=u.split("v=")[-1].split("&")[0][:15],
-                url=u,
-                title=f"Direct tutorial ({u})",
-                channel="Direct URL",
-                description="",
-            )
-            for u in direct_urls[:max_videos]
-        ]
+        by_id: dict[str, YouTubeCandidate] = {}
+        for url in direct_urls:
+            candidate = _direct_candidate(url)
+            by_id[candidate.video_id] = candidate
+            if len(by_id) == max_videos:
+                break
+        selected = list(by_id.values())
     else:
         candidates = await search_youtube_tutorials(goal, max_results=5, settings=gemini.settings)
         selected, decisions = await gate_youtube_candidates(
@@ -202,14 +220,18 @@ async def research_goal_on_youtube(
             gemini=gemini,
             max_keep=max_videos,
         )
+    if not selected:
+        raise RuntimeError("No hands-on tutorials matched this goal.")
 
     tasks = [analyze_youtube_video(goal, cand, gemini) for cand in selected]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     extracts: list[TutorialExtract] = []
-    for cand, res in zip(selected, results):
+    for cand, res in zip(selected, results, strict=True):
+        if isinstance(res, asyncio.CancelledError):
+            raise res
         if isinstance(res, Exception):
-            logger.warning("Failed to analyze %s: %s", cand.url, res)
+            logger.warning("Failed to analyze video %s (%s)", cand.video_id, type(res).__name__)
             continue
         extracts.append(res)
 

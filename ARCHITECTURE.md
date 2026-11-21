@@ -1,6 +1,10 @@
 # CraftPOV — System Architecture
 
-This document outlines the technical architecture, **Gemini 4 model routing (`Argon`, `Carbon`, `Neon`, `Hydrogen`) + Decisions API**, agent contracts, physical world-state pipeline, **Shopify (`shop.dev`) MCP** integration, and **Element 119** stress-testing plan for **CraftPOV**.
+This document describes the hackathon design for **CraftPOV**. The diagrams include planned integrations.
+
+**What runs today.** The React workbench displays the written plan and materials while FastAPI coordinates rendering. Gemini Omni creates each shot using the preceding shot’s final frame for continuity. The prompt calls for hands and tool contact when the action requires them. Gemini TTS reads the narration, and FFmpeg assembles one chaptered film with timed captions. An optional illustrated mode animates three keyframes per step. Project state and job progress persist in SQLite.
+
+**Shopify and UCP.** The public `/ucp-agent-profile.json` advertises the upstream shopping capabilities. Checkout, desk-photo inventory and live camera coaching remain planned. The API preserves the existing cart rebuild acknowledgement.
 
 ---
 
@@ -52,10 +56,11 @@ flowchart TB
         YTAPI["YouTube Data API v3"]
         G4["Gemini 4 API\n(Argon · Carbon · Neon · Hydrogen)"]
         ShopifyMCP["Shopify Storefront MCP Server"]
-        Storage["Local / GCS Media Store"]
+        Storage["Local media / Vercel Blob"]
     end
 
-    Input --> API --> Orch
+    Jobs["SQLite projects, claims and progress events"]
+    Input --> API --> Jobs --> Orch
     Orch --> YT
     YT <--> YTAPI
     YT <--> G4
@@ -239,10 +244,10 @@ class ShoppingCartProposal(BaseModel):
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
 | `/api/projects` | `POST` | Submit a build goal + optional owned items / desk photo. Returns `project_id`. |
-| `/api/projects/{id}/events` | `GET` | **SSE stream** emitting: `research_started`, `plan_ready`, `cart_ready`, `step_media_ready`, `completed`, `error`. |
-| `/api/projects/{id}` | `GET` | Full hydrated project state (`BuildPlan`, `ShoppingCartProposal`, step media URLs). |
-| `/api/projects/{id}/cart/rebuild` | `POST` | Recalculate Shopify cart when user toggles owned/needed items in the checklist. |
-| `/api/projects/{id}/steps/{step}/checkin` | `POST` | Upload a webcam frame of the user's real progress; returns **Hydrogen + Neon** visual critique & voice audio. |
+| `/api/projects/{id}/events` | `GET` | Sends a full `snapshot` on every connection, followed by `status`, `research_complete`, `plan_ready`, step media updates, `full_video_ready` or `project_error`. A terminal status closes the stream. |
+| `/api/projects/{id}` | `GET` | Current plan, step media, full tutorial URL and status. `partial` retains available clips if another clip or the final assembly fails. |
+| `/api/projects/{id}/cart/rebuild` | `POST` | Returns the upstream acknowledgement and submitted owned material IDs for an existing project (HTTP 200). An unknown ID returns 404. |
+| `/api/projects/{id}/steps/{step}/checkin` | `POST` | Reserved for camera coaching. Returns HTTP 501 for an existing project. |
 | `/media/{project_id}/{file}` | `GET` | Serves generated step MP4s, keyframes, voice clips, and stitched video. |
 
 ---

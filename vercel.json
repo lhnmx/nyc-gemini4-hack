@@ -1,0 +1,19 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "fastapi",
+  "buildCommand": "npm --prefix frontend ci --include=dev && npm --prefix frontend run build",
+  "functions": {
+    "app.py": {
+      "maxDuration": 120,
+      "excludeFiles": "{frontend/node_modules/**,frontend/public/**,frontend/src/**,src/nyc_gemini4_hack/web/**}"
+    }
+  },
+  "daemons": {
+    "renderer": {
+      "root": "src",
+      "entrypoint": "Dockerfile.worker",
+      "instances": { "iad1": 1 },
+      "terminationGracePeriodSeconds": 900
+    }
+  }
+}
