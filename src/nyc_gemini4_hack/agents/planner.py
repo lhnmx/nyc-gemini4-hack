@@ -56,7 +56,7 @@ async def synthesize_build_plan(
         "Generate a complete BuildPlan JSON:\n"
         "- source_youtube_urls: list of the source URLs used.\n"
         "- materials: deduplicated Bill of Materials with short unique ids (e.g. 'mat_1'), "
-        "clean Shopify-friendly search_query strings (e.g. 'green polymer clay'), "
+        "clean Shopify-friendly search_query strings (e.g. 'double sided origami paper'), "
         "and status='OWNED_EXACT' if clearly covered by the user's owned list, else 'BUY'.\n"
         "- steps: 5 to 7 atomic steps. For each step:\n"
         "  * narration_script: crisp, warm spoken instruction (~12–18 words, fits a 6-second POV clip).\n"

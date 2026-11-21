@@ -23,7 +23,7 @@ Learning a physical skill (sculpting a clay figure, soldering a macro pad, leath
 ## 2. Target Users & Core Demo Flow
 
 ### Primary Persona
-A maker/beginner at home with a physical goal (*"sculpt a polymer clay frog"*), a messy desk, and messy hands who wants clear, over-the-hands guidance without scrubbing 25-minute YouTube timelines.
+A maker/beginner at home with a physical goal (*"Fold a Himmel und Hölle origami paper fortune teller"*), a messy desk, and busy hands who wants clear, over-the-hands guidance without scrubbing 25-minute YouTube timelines.
 
 ### Hero User Journey (Live, Unscripted Demo)
 1. **Intake**: User enters *any* physical craft goal (and optionally snaps/uploads a photo of their desk).

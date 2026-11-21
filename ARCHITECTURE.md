@@ -90,10 +90,10 @@ sequenceDiagram
     participant MCP as Shopify MCP
     participant Media as POV Media Pipeline
 
-    User->>API: POST /projects {"goal": "Build a clay frog", "desk_photo": ...}
+    User->>API: POST /projects {"goal": "Fold a Himmel und Hölle origami paper fortune teller", "desk_photo": ...}
     API-->>User: 202 Accepted {project_id} + SSE stream
 
-    API->>YT: Search & watch top tutorials for "sculpt clay frog"
+    API->>YT: Search & watch top tutorials for "Himmel und Hölle origami"
     YT->>YT: Fetch top 3–5 YouTube tutorials (metadata + video/transcript)
     YT->>YT: Carbon extracts timestamped steps, hand techniques & visible tools
     YT-->>API: TutorialExtract[]
@@ -129,7 +129,7 @@ sequenceDiagram
 ### 4.1 YouTube Research Agent (`agents/researcher.py` — **Gemini 4 Carbon**)
 - **Goal**: Ground physical instructions in real craftspeople's techniques rather than hallucinated text steps.
 - **Workflow**:
-  1. Queries **YouTube Data API v3** with craft-specific queries (e.g., `"polymer clay frog tutorial for beginners"`), filtering for high-engagement, focused videos (3–15 min).
+  1. Queries **YouTube Data API v3** with craft-specific queries (e.g., `"Himmel und Hölle origami tutorial for beginners"`), filtering for high-engagement, focused videos (3–15 min).
   2. Passes the top 2–3 YouTube videos to **Gemini 4 Carbon** for native multimodal video understanding.
   3. Extracts timestamped techniques, exact tools/materials visible on screen (even when not mentioned verbally), relative proportions, and hand grips.
 - **Output**: `list[TutorialExtract]`

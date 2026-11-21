@@ -6,7 +6,7 @@
 > - **Track:** Problem Statement Two — **Element 119** *(Multimodal In → Multimodal Out)*
 > - **Bonus Track:** **Build with Commerce (Shopify / `shop.dev`)**
 
-CraftPOV turns any live physical-world goal (e.g., *"sculpt a clay frog"*, *"solder a custom macro pad"*, *"make a leather cardholder"*) into a physically grounded, first-person (**POV**) video + voice guide synthesized directly from raw YouTube video/audio streams — and uses a **Shopify (`shop.dev`)** shopping agent to source any tools or materials missing from your desk.
+CraftPOV turns any live physical-world goal (e.g., *"Fold a Himmel und Hölle origami paper fortune teller"*, *"solder a custom macro pad"*, *"make a leather cardholder"*) into a physically grounded, first-person (**POV**) video + voice guide synthesized directly from raw YouTube video/audio streams — and uses a **Shopify (`shop.dev`)** shopping agent to source any tools or materials missing from your desk.
 
 ---
 
@@ -45,7 +45,7 @@ CraftPOV routes each stage of the pipeline to the Gemini 4 model best suited for
 
 ```mermaid
 flowchart LR
-    U["User Goal + Optional Desk Photo\n(e.g. 'Sculpt a clay frog')"] --> R["YouTube Research Agent\n(Gemini 4 Carbon)"]
+    U["User Goal + Optional Desk Photo\n(e.g. 'Fold a Himmel und Hölle origami')"] --> R["YouTube Research Agent\n(Gemini 4 Carbon)"]
     R --> P["Planner & World-State Graph\n(Gemini 4 Argon + Hydrogen)"]
     P --> C["Commerce Agent\n(Gemini 4 Neon + Shopify MCP)"]
     P --> M["POV Media Pipeline\n(Continuity Keyframes + Veo POV + Voice)"]

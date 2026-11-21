@@ -54,11 +54,10 @@ async def _run(
             max_steps=max_media_steps,
         )
     else:
-        if not goal:
-            raise SystemExit("Provide a goal or --from-json <path>.")
+        resolved_goal = goal or "Fold a Himmel und Hölle origami paper fortune teller"
         project = ProjectState(
             project_id=uuid.uuid4().hex[:8],
-            goal=goal,
+            goal=resolved_goal,
             owned_items=owned,
         )
         final_state = await run_project_pipeline(
@@ -88,7 +87,7 @@ async def _run(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="CraftPOV CLI — End-to-End Pipeline & POV Video Generator")
-    parser.add_argument("goal", nargs="?", help="Physical build goal (e.g. 'sculpt a polymer clay frog')")
+    parser.add_argument("goal", nargs="?", help="Physical build goal (default: 'Fold a Himmel und Hölle origami paper fortune teller')")
     parser.add_argument("--owned", default="", help="Comma-separated items you already own")
     parser.add_argument("--url", action="append", default=[], help="Optional direct YouTube URL(s)")
     parser.add_argument("--max-videos", type=int, default=2, help="Max YouTube videos to watch")
