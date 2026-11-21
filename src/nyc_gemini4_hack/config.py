@@ -29,7 +29,9 @@ class Settings(BaseSettings):
     gemini_decisions_model: str = Field(default="gemini-decision-1")
     gemini_decisions_api_version: str = Field(default="v1alpha")
 
-    # Media Generation (Veo / Imagen / TTS)
+    # Media Generation (POV Keyframes / Video / Voice)
+    pov_image_model: str = Field(default="gemini-3.1-flash-image")
+    audio_model: str = Field(default="gemini-omni-flash-preview")
     veo_model: str = Field(default="veo-3.0-generate-preview")
     imagen_model: str = Field(default="imagen-3.0-generate-002")
     tts_voice: str = Field(default="Aoede")
