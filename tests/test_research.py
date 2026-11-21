@@ -22,6 +22,49 @@ def extract():
 
 
 class ResearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_search_duration_lookup_uses_same_credentials_without_polluting_links(self):
+        def respond(request):
+            self.assertEqual(request.headers["X-Goog-Api-Key"], "offline")
+            self.assertNotIn("offline", str(request.url))
+            if request.url.path.endswith("/search"):
+                return httpx.Response(200, json={"items": [
+                    {"id": {"videoId": "abcdefghijk"}, "snippet": {"title": "Fold &amp; Fly"}}
+                ]})
+            self.assertTrue(request.url.path.endswith("/videos"))
+            self.assertEqual(request.url.params["id"], "abcdefghijk")
+            return httpx.Response(200, json={"items": [
+                {"id": "abcdefghijk", "contentDetails": {"duration": "PT2M7S"}}
+            ]})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        settings = Settings(_env_file=None, youtube_api_key="offline")
+        with patch.object(researcher.httpx, "AsyncClient", return_value=client):
+            videos = await researcher.search_youtube_tutorials("Fold a glider", settings=settings)
+        self.assertEqual((videos[0].title, videos[0].duration_seconds), ("Fold & Fly", 127))
+
+    async def test_one_qualified_source_by_default_with_reserve_only_after_failure(self):
+        candidates = [researcher.YouTubeCandidate(key, f"https://youtu.be/{key}", title, "Maker", "", duration)
+                      for key, title, duration in [("aaaaaaaaaaa", "Full lesson", 760),
+                                                   ("bbbbbbbbbbb", "Quick tutorial", 130),
+                                                   ("ccccccccccc", "Product reel", 60)]]
+        service = Mock()
+        service.decide_batch = AsyncMock(return_value={
+            f"video_{i}_relevance": DecisionResult(gate_name=f"video_{i}_relevance", choice=choice, confidence=score)
+            for i, choice, score in [(1, "KEEP_TUTORIAL", .98), (2, "KEEP_TUTORIAL", .96), (3, "SKIP_FILLER", .99)]
+        })
+        with patch.object(researcher, "search_youtube_tutorials", AsyncMock(return_value=candidates)) as search:
+            for outputs, expected in [([extract()], ["Quick tutorial"]),
+                                      ([RuntimeError("unavailable"), extract()], ["Full lesson"])]:
+                with self.subTest(expected=expected):
+                    service.generate_structured = AsyncMock(side_effect=outputs)
+                    sources, decisions = await researcher.research_goal_on_youtube("Fold", service)
+                    self.assertEqual([source.title for source in sources], expected)
+                    self.assertEqual([decision.source_title for decision in decisions], [c.title for c in candidates])
+                    self.assertEqual(service.generate_structured.await_count, len(outputs))
+                    urls = [c.kwargs["contents"][0].file_data.file_uri for c in service.generate_structured.await_args_list]
+                    self.assertEqual(urls, [candidates[1].url, candidates[0].url][:len(outputs)])
+                    self.assertEqual(search.await_args.kwargs["max_results"], 3)
+
     async def test_discovery_key_stays_out_of_urls_and_http_errors(self):
         cfg = Settings(_env_file=None, youtube_api_key="test-only-credential")
         seen = []

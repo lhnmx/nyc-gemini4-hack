@@ -18,6 +18,7 @@ from nyc_gemini4_hack.config import Settings, get_settings
 from nyc_gemini4_hack.intake import creation_response, prepare_project
 from nyc_gemini4_hack.job_store import JobStore, JobStoreError, open_job_store
 from nyc_gemini4_hack.models import ProjectState, ProjectStatus, RebuildCartRequest
+from nyc_gemini4_hack.shopping import catalog_config, shopping_router
 
 ProjectId = Annotated[str, ApiPath(pattern=r"^[a-zA-Z0-9_-]+$", max_length=96)]
 
@@ -68,6 +69,7 @@ def create_app(*, hosted: bool = False, settings: Settings | None = None) -> Fas
                     await asyncio.gather(job, return_exceptions=True)
 
     app = FastAPI(title="CraftPOV", version="0.1.0", lifespan=lifespan)
+    app.include_router(shopping_router(settings))
 
     @app.exception_handler(httpx.HTTPError)
     @app.exception_handler(JobStoreError)
@@ -77,6 +79,7 @@ def create_app(*, hosted: bool = False, settings: Settings | None = None) -> Fas
 
     async def readiness(request: Request) -> dict:
         provider = settings.readiness_summary()
+        provider["capabilities"]["material_catalog"] = catalog_config(settings) is not None
         store = request.app.state.store
         message = ""
         if store is None:

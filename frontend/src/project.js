@@ -4,6 +4,27 @@ const apiBase = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 export const apiUrl = path => apiBase + path;
 export const isFinished = status => ['completed', 'partial', 'failed'].includes(status);
 
+export function mediaActivity(project) {
+  return (project?.activity || []).filter(entry => ['motion', 'narration', 'assembly'].includes(entry.stage));
+}
+
+export function legacyMediaStage(project, activity) {
+  if (activity.length || project?.status !== 'generating') return null;
+  const progress = project.media_progress;
+  const asset = project.media?.[progress?.step_number];
+  return ['ready', 'skipped', 'error'].includes(asset?.status) ? null : progress;
+}
+
+export function chapterRenderState(number, asset, activity, legacyStage) {
+  // A chapter can have narration while its footage is still queued behind a physical dependency.
+  const video = activity.filter(entry => entry.step_number === number && entry.stage !== 'narration');
+  if (video.some(entry => entry.state === 'failed')) return 'error';
+  if (video.some(entry => entry.state === 'started')) return 'rendering';
+  if (video.length) return 'waiting';
+  if (asset?.status === 'generating' || legacyStage?.step_number === number) return 'rendering';
+  return 'queued';
+}
+
 export function mediaUrl(value, projectId, example) {
   const prefix = example ? '/static/example/' : '/media/' + encodeURIComponent(projectId) + '/';
   if (typeof value !== 'string' || !value.startsWith(prefix)) return undefined;
@@ -32,12 +53,17 @@ export function youtubeLinks(sources = []) {
 export function useHealth(refresh) {
   const [health, setHealth] = useState({ label: 'Checking services', detail: 'Checking guide generation services…' });
   useEffect(() => {
-    const request = new AbortController();
+    let closed = false;
+    let request;
+    let retry;
     async function check() {
+      request = new AbortController();
+      const deadline = setTimeout(() => request.abort(), 5000);
       try {
-        const response = await fetch(apiUrl('/api/health'), { signal: request.signal });
+        const response = await fetch(apiUrl('/api/health'), { signal: request.signal, cache: 'no-store' });
         if (!response.ok) throw new Error();
         const data = await response.json();
+        if (closed) return;
         const missing = [];
         if (!data.gemini_configured) missing.push('Gemini');
         if (!data.youtube_configured) missing.push('YouTube');
@@ -46,13 +72,23 @@ export function useHealth(refresh) {
           ? 'Guide generation needs the ' + missing.join(' and ') + ' API ' + (missing.length === 1 ? 'key' : 'keys') + ' configured on the server.'
           : 'The server has API keys for Gemini and YouTube.';
         const detail = data.generation_message || (blocked && !missing.length ? 'Guide generation is unavailable on this server.' : keyStatus);
-        setHealth({ label: blocked ? 'Setup needed' : 'Services ready', detail, blocked });
+        setHealth({ label: blocked ? 'Setup needed' : 'Services ready', detail, blocked, catalogEnabled: data.capabilities?.material_catalog === true });
+        if (blocked && refresh) retry = setTimeout(check, 5000);
       } catch {
-        if (!request.signal.aborted) setHealth({ label: 'Server unavailable', detail: 'The guide generation server could not be reached.', blocked: true });
+        if (closed) return;
+        setHealth(current => ({ label: 'Reconnecting', detail: 'Checking the connection again shortly.',
+          reconnecting: true, catalogEnabled: current.catalogEnabled }));
+        retry = setTimeout(check, 5000);
+      } finally {
+        clearTimeout(deadline);
       }
     }
     check();
-    return () => request.abort();
+    return () => {
+      closed = true;
+      clearTimeout(retry);
+      request.abort();
+    };
   }, [refresh]);
   return health;
 }
@@ -77,16 +113,30 @@ export function useProject(route) {
         if (isFinished(state.status)) stream.close();
       });
       const applyStatus = update => {
-        setProject(state => ({ ...state, status: update.status, status_message: update.message }));
+        setProject(state => ({
+          ...state, status: update.status, status_message: update.message,
+          media_progress: update.media_progress ?? (update.status === 'generating' && update.step_number
+            ? { stage: 'footage', step_number: update.step_number } : state.media_progress),
+        }));
         if (isFinished(update.status)) stream.close();
       };
       listen('status', applyStatus);
       listen('project_error', applyStatus);
       listen('error', applyStatus);
       listen('plan_ready', plan => setProject(state => ({ ...state, plan })));
+      listen('activity', event => setProject(state => {
+        const history = state.activity || [];
+        const present = history.some(entry => entry.id === event.id);
+        const activity = present ? history.map(entry => entry.id === event.id ? event : entry) : [...history, event];
+        return { ...state, activity };
+      }));
+      const applyDecisions = data => setProject(state => ({ ...state, decisions_log: data.decisions || [] }));
+      listen('research_decisions', applyDecisions);
+      listen('research_complete', applyDecisions);
       const applyAsset = asset => setProject(state => ({
         ...state, media: { ...state.media, [asset.step_number]: asset },
       }));
+      listen('step_media_started', applyAsset);
       listen('step_media_ready', applyAsset);
       listen('step_media_error', applyAsset);
       listen('full_video_ready', data => setProject(state => ({
@@ -126,22 +176,6 @@ export function useProject(route) {
     return () => { request.abort(); stream?.close(); };
   }, [route]);
   return { project, error, connection };
-}
-
-export function guideStatus(project, example, hasFilm) {
-  if (!project) return { kind: 'busy', message: 'Opening guide…' };
-  if (example) return { message: '' };
-  const { status, status_message: detail, plan } = project;
-  if (status === 'completed') return { message: hasFilm ? '' : 'Your written guide is ready. A full video is unavailable.' };
-  if (status === 'partial') return { kind: 'partial', message: detail || 'Your written guide is ready. The full video could not be assembled.' };
-  if (status === 'failed') return { kind: 'error', message: detail || 'Guide generation failed. You can submit your project again.' };
-  const message = {
-    queued: 'Your guide is queued.',
-    researching: 'Finding and reviewing craft tutorials…',
-    planning: 'Writing your steps and materials list…',
-    generating: detail || (plan ? 'Your written steps are ready. Preparing the film and narration…' : 'Preparing the film and narration…'),
-  }[status];
-  return { kind: 'busy', message: message || 'Preparing your guide…' };
 }
 
 export function readSelection(id) {

@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from nyc_gemini4_hack import blob_media, cloud_worker
 from nyc_gemini4_hack.config import Settings
 from nyc_gemini4_hack.job_store import open_job_store
-from nyc_gemini4_hack.models import ProjectStatus, StepMediaAsset
+from nyc_gemini4_hack.models import ProjectState, ProjectStatus, StepMediaAsset
 from nyc_gemini4_hack.server import create_app
 from tests.test_pipeline import paper_plan
 
@@ -134,6 +134,58 @@ class ApiTests(unittest.TestCase):
                     self.assertEqual(client.get("/").status_code, 200)
                     example = client.get("/static/example/project.json").json()
                     self.assertEqual(client.get(example["full_video_url"], headers={"Range": "bytes=0-1"}).status_code, 206)
+
+    def test_concurrent_chapters_publish_consistent_snapshots_and_upload_once(self):
+        async def check(hosted):
+            project = ProjectState(project_id=f"parallel-{int(hosted)}", goal="Fold two sheets")
+            saving, release = asyncio.Event(), asyncio.Event()
+            snapshots = []
+            uploads = []
+            async with open_job_store(self.settings.sqlite_path) as store:
+                await store.enqueue(project)
+                project = await store.claim("worker")
+                persist = store.checkpoint
+
+                async def save(worker, state, event, data):
+                    if not hosted and not snapshots:
+                        saving.set()
+                        await release.wait()
+                    snapshots.append((event, list(state.media)))
+                    return await persist(worker, state, event, data)
+
+                async def upload(_, name, __):
+                    if name == "second.mp4":
+                        saving.set()
+                        await release.wait()
+                    uploads.append(name)
+
+                async def two_chapters(state, publish_event):
+                    async def ready(number, name):
+                        clip = StepMediaAsset(step_number=number, status="ready",
+                                              video_url=f"/media/{state.project_id}/{name}.mp4")
+                        state.media[number] = clip
+                        await publish_event(state.project_id, "step_media_ready", clip.model_dump())
+
+                    second = asyncio.create_task(ready(2, "second"))
+                    await saving.wait()
+                    first = asyncio.create_task(ready(1, "first"))
+                    await asyncio.sleep(0)
+                    release.set()
+                    await asyncio.gather(second, first)
+                    state.status = ProjectStatus.COMPLETED
+                    await publish_event(state.project_id, "status", {"status": "completed"})
+
+                with patch.object(store, "checkpoint", save), patch.object(blob_media, "upload", upload), \
+                        patch.object(cloud_worker, "run_project_pipeline", two_chapters):
+                    await asyncio.wait_for(cloud_worker.render(store, "worker", project, self.settings, hosted=hosted), 5)
+                self.assertEqual(snapshots, [("step_media_ready", [2]), ("step_media_ready", [2, 1]), ("status", [2, 1])])
+                self.assertEqual(uploads, ["second.mp4", "first.mp4"] if hosted else [])
+                events = await store.events_after(project.project_id, 0)
+                self.assertEqual([e["data"].get("step_number") for e in events], [2, 1, None])
+
+        for hosted in (False, True):
+            with self.subTest(hosted=hosted):
+                asyncio.run(check(hosted))
 
     def test_live_stream_replays_updates_written_after_opening_snapshot(self):
         from threading import Event

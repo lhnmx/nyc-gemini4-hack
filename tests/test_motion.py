@@ -13,7 +13,7 @@ from google import genai
 
 from nyc_gemini4_hack.config import Settings
 from nyc_gemini4_hack.gemini_client import Gemini4Client
-from nyc_gemini4_hack.media.motion_gen import compose_motion_with_voice, generate_step_motion
+from nyc_gemini4_hack.media.motion_gen import compose_motion_with_voice, generate_motion_shot, generate_step_motion
 from nyc_gemini4_hack.models import BuildStep, PhysicalStateTransition, VisualContinuityBible
 from tests.test_video import decode, write_tone
 
@@ -67,7 +67,7 @@ class MotionTests(unittest.IsolatedAsyncioTestCase):
         video = moving_shot(self.folder / "source.mp4").read_bytes()
         requests = []
         file_states = iter(["PROCESSING", "ACTIVE"])
-        uri = "https://generativelanguage.googleapis.com/v1beta/files/shot123"
+        uri = "https://generativelanguage.googleapis.com/v1beta/files/shot123:download?alt=media"
 
         def transport(request):
             path = request.url.path
@@ -85,11 +85,14 @@ class MotionTests(unittest.IsolatedAsyncioTestCase):
 
         client = await self.client_with(transport)
         with patch("nyc_gemini4_hack.media.motion_gen.asyncio.sleep", new_callable=AsyncMock):
-            motion = await generate_step_motion(self.step, self.bible, self.folder, client)
-        self.assertEqual(motion.read_bytes(), video)
+            motion = await generate_motion_shot(self.step, self.bible, self.folder, client)
+        self.assertEqual(motion.video.read_bytes(), video)
+        self.assertEqual(motion.frames, 24)
+        self.assertAlmostEqual(bar_locations(motion.end_frame)[0], bar_locations(motion.video)[-1], delta=1)
         voice = self.folder / "voice.wav"
         write_tone(voice, 0.2, 24000)
         film, poster, end = await compose_motion_with_voice(motion, voice, self.folder / "chapter.mp4")
+        self.assertEqual(end, motion.end_frame)
 
         # A later wait can start from the actual result of the previous physical manipulation.
         wait = self.step.model_copy(update={"step_number": 2, "duration_seconds": 45, "title": "Let the dye dry"})
@@ -107,7 +110,14 @@ class MotionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(base64.b64decode(first["data"]), end.read_bytes())
         self.assertEqual(first["mime_type"], "image/jpeg")
         self.assertIn("preceding action", text["text"])
-        for detail in [self.bible.hands_description, self.step.physical_state.hand_kinematics,
+        self.assertIn(self.step.physical_state.start_state, text["text"])
+        self.assertIn(self.step.physical_state.end_state, text["text"])
+        self.assertIn("preserve the visible setup", text["text"])
+        self.assertIn("one continuous manipulation", requests[0]["input"][0]["content"][0]["text"])
+        self.assertNotIn("keep hands out of frame", requests[0]["input"][0]["content"][0]["text"])
+        self.assertIn(self.bible.hands_description, requests[0]["input"][0]["content"][0]["text"])
+        self.assertNotIn(self.bible.hands_description, text["text"])
+        for detail in [self.step.physical_state.hand_kinematics,
                        self.step.physical_state.verification_cues[0], "keep hands out of frame"]:
             self.assertIn(detail, text["text"])
 

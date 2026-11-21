@@ -4,19 +4,37 @@ import json
 
 from pydantic import BaseModel, Field
 
+from nyc_gemini4_hack.agents.researcher import ActivityReporter, agent_operation
 from nyc_gemini4_hack.gemini_client import Gemini4Client
 from nyc_gemini4_hack.models import (
-    BuildPlan,
-    MaterialStatus,
-    PhysicalStateTransition,
-    TutorialExtract,
-    VisualContinuityBible,
+    BuildPlan, BuildStep, MaterialItem, MaterialStatus, PhysicalStateTransition,
+    TutorialExtract, VisualContinuityBible,
 )
+
+
+class _WrittenStep(BaseModel):
+    step_number: int = Field(ge=1)
+    title: str
+    instruction_text: str
+    narration_script: str
+    tips: list[str] = Field(default_factory=list)
+    duration_seconds: int = Field(default=6, ge=1)
+
+
+class _WrittenPlan(BaseModel):
+    """The writer only generates fields that survive physical planning."""
+
+    project_title: str
+    estimated_time_minutes: int
+    difficulty: str = "beginner"
+    source_youtube_urls: list[str] = Field(default_factory=list)
+    materials: list[MaterialItem] = Field(default_factory=list)
+    steps: list[_WrittenStep] = Field(min_length=1)
 
 
 class _GroundedStepUpdate(BaseModel):
     step_number: int
-    pov_video_prompt: str
+    visual_parent: int = Field(default=-1, ge=-1)
     physical_state: PhysicalStateTransition
 
 
@@ -30,104 +48,78 @@ async def synthesize_build_plan(
     extracts: list[TutorialExtract],
     owned_items: list[str],
     gemini: Gemini4Client,
+    *,
+    on_activity: ActivityReporter | None = None,
 ) -> BuildPlan:
-    """
-    Two-stage physical planning pipeline:
-      1. Gemini 4 Argon (Deep Reasoning): Synthesizes multi-video extracts into one
-         physically valid BuildPlan, deduplicated BOM, and concise voice narration scripts.
-      2. Gemini 4 Hydrogen (World-Model Grounding): Locks the VisualContinuityBible and
-         enforces coherent 3D PhysicalStateTransitions (start_state -> hand_kinematics -> end_state)
-         and first-person POV video prompts across every step.
-    """
-    extracts_json = json.dumps([e.model_dump() for e in extracts], indent=2)
-    owned_str = json.dumps(owned_items, ensure_ascii=False)
-
-    # Stage 1: Gemini 4 Argon — Deep physical synthesis & BOM
-    argon_system = (
-        "You are a master craftsperson and physical fabrication planner (Gemini 4 Argon). "
-        "Synthesize observations from multiple real YouTube tutorials into ONE clear, beginner-friendly, "
-        "physically accurate BuildPlan. Respect real-world physics (structural support, joint attachment, "
-        "proportions, curing/drying order). Keep the build to 5–7 atomic, actionable steps."
-    )
+    """Write the guide once; send the footage planner only the actions and their observed contacts."""
+    observations = [
+        source.model_dump(include={"url", "extracted_materials", "segments", "common_mistakes"},
+                          exclude_defaults=True) for source in extracts
+    ]
     argon_prompt = (
-        f"User Goal: {goal}\n"
-        f"Items user says they already own: {owned_str}\n\n"
-        f"Observed YouTube Tutorial Extracts:\n{extracts_json}\n\n"
-        "Generate a complete BuildPlan JSON:\n"
-        "- source_youtube_urls: list of the source URLs used.\n"
-        "- materials: deduplicated Bill of Materials with short unique ids (e.g. 'mat_1'), "
-        "clean Shopify-friendly search_query strings (e.g. 'double sided origami paper'), "
-        "and a material name that matches the user's wording when it names the same item.\n"
-        "- steps: order the dependencies and number the steps consecutively from 1. For each step:\n"
-        "  * narration_script: what the maker should hear while watching. Start with the action verb, "
-        "name its target, then give one concrete cue for when to stop. Aim for 10–14 spoken words "
-        "in a six-second clip. Use everyday speech, including units spoken in full. Omit greetings, "
-        "step numbers, camera directions and performance notes. Example: "
-        "'Fold the bottom corner up until the two edges meet.'\n"
-        "  * instruction_text: give the full instruction, including real waiting times, measurements "
-        "and any necessary precautions; keep these intact even when the narration is shorter.\n"
-        "  * pov_video_prompt: describe one visible action from the maker's viewpoint.\n"
-        "  * physical_state: start_state, hand_kinematics, end_state, verification_cues.\n"
-        "  * duration_seconds: 6."
+        f"Goal: {goal}\nOwned items: {json.dumps(owned_items, ensure_ascii=False)}\n"
+        f"Observed tutorials: {json.dumps(observations, ensure_ascii=False, separators=(',', ':'))}\n"
+        "Choose one demonstrated method. Write only the operations needed for the requested result. "
+        "Keep the guide complete, aim for 3–6 chapters on simple jobs. Each chapter demonstrates one "
+        "continuous manipulation at a readable speed. Split different actions (folding, writing, opening) "
+        "into distinct chapters. Skip optional decoration unless requested. For repeated identical actions, "
+        "state the count and allow enough seconds to perform every repetition; never skip a required operation. "
+        "For instruction_text, write one or two short sentences. Preserve measurements, real waiting times and necessary safety precautions. "
+        "For narration_script, use one speakable action plus its stopping cue, usually 8–14 words. "
+        "Number chapters from 1. Use 6 seconds for a simple motion, up to 15 when repetitions need it. "
+        "List distinct materials and tools with short unique IDs, quantity and a simple shopping search. Cite source URLs used."
     )
+    async with agent_operation(on_activity, id="plan-synthesis", stage="planning", label="Draft build steps",
+                               agent="Build planner", model=gemini.model_id("argon") if on_activity else None,
+                               detail=" · ".join(s.title for s in extracts)) as synthesis:
+        draft = await gemini.generate_structured(
+            role="argon", contents=argon_prompt, response_schema=_WrittenPlan, temperature=0.2,
+            system_instruction="You write concise, actionable instructions grounded in observed craft demonstrations.",
+        )
+        source_urls = list(dict.fromkeys(s.url for s in extracts))
+        cited = [url for url in dict.fromkeys(draft.source_youtube_urls) if url in source_urls] or source_urls
+        owned_names = {" ".join(item.casefold().split()) for item in owned_items if item.strip()}
+        for mat in draft.materials:
+            name = " ".join(mat.name.casefold().split())
+            mat.status = MaterialStatus.OWNED_EXACT if name in owned_names else MaterialStatus.BUY
+            mat.substitute_note = None
+        synthesis.detail = " · ".join(step.title for step in draft.steps)
 
-    plan = await gemini.generate_structured(
-        role="argon",
-        contents=argon_prompt,
-        response_schema=BuildPlan,
-        system_instruction=argon_system,
-        temperature=0.25,
-    )
-
-    # Source links and inventory come from the actual inputs, independently of model guesses.
-    source_urls = list(dict.fromkeys(extract.url for extract in extracts))
-    cited = dict.fromkeys(plan.source_youtube_urls)
-    plan.source_youtube_urls = [url for url in cited if url in source_urls] or source_urls
-    owned_names = {" ".join(item.casefold().split()) for item in owned_items if item.strip()}
-    for mat in plan.materials:
-        name = " ".join(mat.name.casefold().split())
-        mat.status = MaterialStatus.OWNED_EXACT if name in owned_names else MaterialStatus.BUY
-        mat.substitute_note = None
-
-    # Stage 2: Gemini 4 Hydrogen — World-model physical state & POV continuity grounding
-    hydrogen_system = (
-        "You direct a first-person craft tutorial filmed from one fixed position. "
-        "Plan each chapter of one continuous tutorial film. Show the initial setup, hand or tool contact in motion, and the resulting state. "
-        "Keep material, part count, scale, orientation, and completed work consistent across frames. "
-        "Keep elapsed real-world processes such as drying or cooling explicit in the state descriptions."
-    )
+    actions = [(s.step_number, s.title, s.instruction_text) for s in draft.steps]
+    contacts = [f"{segment.technique}: {segment.hand_action}" for s in extracts if s.url in cited for segment in s.segments]
     hydrogen_prompt = (
-        f"Refine the VisualContinuityBible and every step's PhysicalStateTransition + pov_video_prompt "
-        f"for this BuildPlan:\n\n{plan.model_dump_json(indent=2)}\n\n"
-        "Rules:\n"
-        "1. Put the stable surface, lighting, eye-line, palette and hand appearance in continuity_bible. "
-        "Choose a view that keeps the working area visible for this craft.\n"
-        "2. Return one update per existing step_number in plan order. Carry the previous end_state "
-        "into the next start_state, accounting for any required waiting period.\n"
-        "3. In hand_kinematics, identify what steadies the work, where the active hand or tool "
-        "makes contact, and its direction and pressure when relevant. For drying or cooling, leave the work undisturbed and make the elapsed time explicit.\n"
-        "4. Give 2–3 visible verification_cues for the result, such as edge alignment or outline.\n"
-        "5. Write pov_video_prompt as a short visual description of the single observable action. "
-        "Keep the same camera position and show only this step’s tools and parts."
+        f"Guide: {draft.project_title}\nMaterials: {', '.join(m.name for m in draft.materials)}\n"
+        f"Ordered chapter actions: {json.dumps(actions, ensure_ascii=False)}\n"
+        f"Observed hand movements: {json.dumps(contacts, ensure_ascii=False)}\n"
+        "For each numbered action give its starting geometry, one continuous manipulation, its resulting geometry, "
+        "and one short, observable verification cue. Use one brief sentence per field. Name the fixed edge or support, "
+        "moving part, contact point, direction of travel and stop. Hands cause the transformation, keep the work visible. "
+        "For folds, say which layer lifts, where the tip lands and where fingers press the crease. "
+        "For a repeated action, apply each repetition in sequence to the same piece. "
+        "For a passive wait, state the actual wait and what changes. Preserve the same sheet of origami and every completed fold. "
+        "visual_parent -1 continues the previous chapter; 0 starts a separate piece; a positive number resumes that earlier "
+        "chapter's piece. Carry its end geometry into the next opening, with consistent orientation, surface, camera and hands. "
+        "Choose a plain contrasting surface and paper finish where the contact point and crease are easy to see."
     )
-
-    grounded = await gemini.generate_structured(
-        role="hydrogen",
-        contents=hydrogen_prompt,
-        response_schema=_HydrogenGroundingOutput,
-        system_instruction=hydrogen_system,
-        temperature=0.15,
-    )
-
-    updates_by_num = {s.step_number: s for s in grounded.steps}
-    expected = {step.step_number for step in plan.steps}
-    if len(grounded.steps) != len(expected) or updates_by_num.keys() != expected:
-        raise ValueError("Grounding must provide exactly one physical transition per planned step.")
-
-    plan.continuity_bible = grounded.continuity_bible
-    for step in plan.steps:
-        update = updates_by_num[step.step_number]
-        step.pov_video_prompt = update.pov_video_prompt
-        step.physical_state = update.physical_state
-
-    return plan
+    async with agent_operation(on_activity, id="physical-planning", stage="planning", label="Check physical continuity",
+                               agent="Physical planner", model=gemini.model_id("hydrogen") if on_activity else None,
+                               detail=" · ".join(s.title for s in draft.steps)) as physical:
+        grounded = await gemini.generate_structured(
+            role="hydrogen", contents=hydrogen_prompt, response_schema=_HydrogenGroundingOutput, temperature=0.15,
+            system_instruction="Direct a single locked-camera, first-person craft demonstration with physically coherent chapters.",
+        )
+        updates = {s.step_number: s for s in grounded.steps}
+        expected = {s.step_number for s in draft.steps}
+        if len(grounded.steps) != len(draft.steps) or len(expected) != len(draft.steps) or updates.keys() != expected:
+            raise ValueError("Grounding must provide exactly one physical transition per planned step.")
+        steps = []
+        for step in draft.steps:
+            update = updates[step.step_number]
+            steps.append(BuildStep(**step.model_dump(include=set(_WrittenStep.model_fields)),
+                                   visual_parent=update.visual_parent, physical_state=update.physical_state,
+                                   pov_video_prompt=update.physical_state.hand_kinematics))
+        result = BuildPlan(project_title=draft.project_title, difficulty=draft.difficulty,
+                           estimated_time_minutes=draft.estimated_time_minutes, source_youtube_urls=cited,
+                           materials=draft.materials, steps=steps, continuity_bible=grounded.continuity_bible)
+        physical.detail = f"Checked hand movements and physical dependencies across {len(steps)} steps."
+        return result

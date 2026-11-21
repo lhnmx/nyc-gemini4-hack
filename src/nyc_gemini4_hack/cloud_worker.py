@@ -21,16 +21,21 @@ async def render(store: JobStore, worker_id: str, project: ProjectState, setting
     # Intake has already uploaded the desk photo. The pipeline publishes the rest.
     published = blob_media.media_names(project)
     finished = False
+    save_lock = asyncio.Lock()
 
     async def checkpoint(job_id: str, event: str, data: dict) -> None:
         nonlocal finished
-        if hosted:
-            for filename in sorted(blob_media.media_names(project) - published):
-                await blob_media.upload(job_id, filename, settings.media_output_dir / job_id / filename)
-                published.add(filename)
-        if not await store.checkpoint(worker_id, project, event, data):
-            raise RuntimeError("The worker no longer owns this job.")
-        finished = event == "status" and project.status.terminal
+        # Other chapters can change the project while this event is waiting for storage.
+        snapshot = project.model_copy(deep=True)
+        async with save_lock:
+            if hosted:
+                for filename in sorted(blob_media.media_names(snapshot) - published):
+                    await blob_media.upload(job_id, filename, settings.media_output_dir / job_id / filename)
+                    published.add(filename)
+            if not await store.checkpoint(worker_id, snapshot, event, data):
+                raise RuntimeError("The worker no longer owns this job.")
+            if event == "status" and snapshot.status.terminal:
+                finished = True
 
     job = asyncio.create_task(run_project_pipeline(project, publish_event=checkpoint))
     try:

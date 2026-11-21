@@ -1,20 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import Builder from './Builder.jsx';
-import { Guide, GuideMeta, Sidebar, useSelection } from './Guide.jsx';
-import { chapterStarts, guideStatus, mediaUrl, useHealth, useProject, youtubeLinks } from './project.js';
+import { Film, Progress } from './Film.jsx';
+import { GuideMeta, GuideReferences, GuideStep, Sidebar, StepPicker, useSelection } from './Guide.jsx';
+import { chapterRenderState, chapterStarts, isFinished, legacyMediaStage, mediaActivity, mediaUrl, useHealth, useProject, youtubeLinks } from './project.js';
 import './workbench.css';
 
 function Workbench({ route, onCreated }) {
-  const { project, error, connection } = useProject(route);
+  const { project: saved, error, connection } = useProject(route);
   const [builder, setBuilder] = useState(null);
+  const [submission, setSubmission] = useState(null);
   const [failedFilm, setFailedFilm] = useState(null);
+  const [previewStep, setPreviewStep] = useState(null);
   const health = useHealth(Boolean(builder));
   const video = useRef(null);
   const heading = useRef(null);
   const titleRef = useRef(null);
   const focusFrame = useRef(null);
-  const example = !route.id;
+  const project = submission || saved;
+  const unavailable = !submission && error;
+  const example = !route.id && !submission;
   const plan = project?.plan;
   const steps = plan?.steps || [];
   const selection = useSelection(route.id || 'paper-glider', steps.length);
@@ -26,18 +31,33 @@ function Workbench({ route, onCreated }) {
   const poster = asset(project?.media?.[steps[0]?.step_number]?.keyframe_url);
   const filmError = !!film && failedFilm === film;
   const hasFilm = !!film && !filmError;
-  const status = error ? { kind: 'error', message: error } : connection || guideStatus(project, example, hasFilm);
-  const title = error ? 'Guide unavailable' : plan?.project_title || project?.goal || 'Opening guide…';
-  const canEdit = !!error || project?.status === 'failed' || project?.status === 'partial';
+  const production = mediaActivity(project);
+  const legacyStage = legacyMediaStage(project, production);
+  const chapters = steps.map((step, i) => {
+    const media = project?.media?.[step.step_number];
+    const clip = media?.status === 'ready' && asset(media.video_url);
+    let state;
+    if (hasFilm && starts[i] != null) state = 'timed';
+    else if (clip) state = 'ready';
+    else if (media?.status === 'error' || media?.status === 'ready') state = 'error';
+    else if (media?.status === 'skipped' || isFinished(project?.status)) state = 'skipped';
+    else state = chapterRenderState(step.step_number, media, production, legacyStage);
+    return { step, state, start: starts[i], clip, captions: asset(media?.captions_url), poster: asset(media?.keyframe_url) };
+  });
+  const selected = chapters[selection.index];
+  const preview = selected?.state === 'ready' && previewStep === selected.step.step_number ? selected : null;
+  const title = unavailable ? 'Guide unavailable' : plan?.project_title || project?.goal || 'Opening guide…';
+  const canEdit = !!unavailable || project?.status === 'failed' || project?.status === 'partial';
 
   useEffect(() => { document.title = title + ' · CraftPOV'; }, [title]);
   useEffect(() => {
-    if (route.initial) titleRef.current.focus();
+    if (route.initial || submission) titleRef.current.focus({ preventScroll: true });
     return () => cancelAnimationFrame(focusFrame.current);
-  }, [route]);
+  }, [route, submission]);
   function selectStep(index) {
     if (!steps[index]) return;
-    if (video.current?.readyState >= 1 && starts[index] != null) video.current.currentTime = starts[index];
+    if (hasFilm && !preview && video.current?.readyState >= 1 && starts[index] != null) video.current.currentTime = starts[index];
+    setPreviewStep(chapters[index].state === 'ready' ? steps[index].step_number : null);
     selection.setIndex(index);
     cancelAnimationFrame(focusFrame.current);
     focusFrame.current = requestAnimationFrame(() => {
@@ -52,22 +72,32 @@ function Workbench({ route, onCreated }) {
   return <>
     <a className="skip-link" href="#guide-title">Skip to guide</a>
     <div className="shell">
-      <Sidebar steps={steps} starts={starts} index={selection.index} onSelect={selectStep} hasFilm={hasFilm}
-        sources={sources} example={example} health={health} onNew={() => newGuide()} />
+      <Sidebar chapters={chapters} index={selection.index} onSelect={selectStep}
+        sources={sources} example={example} health={health} onNew={() => newGuide()} submitting={!!submission} />
       <main className="main" id="workspace" aria-labelledby="guide-title">
         <header className="topbar">
           <div className="breadcrumb"><span>Workbench</span><span className="crumb-slash" aria-hidden="true">/</span>
             <span id="guide-kind">{example ? 'Example guide' : 'Your guide'}</span>
           </div>
-          <button className="compact-new" type="button" onClick={() => newGuide()}><span aria-hidden="true">＋</span> New guide</button>
         </header>
         <div className="document">
-          <h1 id="guide-title" ref={titleRef} tabIndex="-1">{title}</h1>
-          {plan && <GuideMeta plan={plan} />}
-          <p className="status" id="status" data-kind={status.kind} role="status" aria-atomic="true">{status.message}</p>
-          {steps.length > 0 && <Guide plan={plan} sources={sources} film={film} poster={poster} captions={captions}
-            starts={starts} selection={selection} onSelect={selectStep} videoRef={video} headingRef={heading}
-            filmError={filmError} onFilmError={() => setFailedFilm(film)} />}
+          <header className="guide-header">
+            <h1 id="guide-title" ref={titleRef} tabIndex="-1">{title}</h1>
+            {plan && <GuideMeta plan={plan} />}
+          </header>
+          {unavailable ? <p className="status" id="status" data-kind="error" role="status">{unavailable}</p> :
+            <div id="plan" className="workspace-grid">
+              <Film project={project} film={film} poster={poster} captions={captions} starts={starts} index={selection.index}
+                setIndex={selection.setIndex} videoRef={video} filmError={filmError} onFilmError={() => setFailedFilm(film)}
+                connection={submission ? null : connection} example={example} preview={preview} continuingPreview={previewStep != null && previewStep === selected?.step.step_number} onClosePreview={() => setPreviewStep(null)} />
+              {steps.length > 0 ? <div className="reading-area">
+                <StepPicker chapters={chapters} index={selection.index} onSelect={selectStep} />
+                <GuideStep steps={steps} index={selection.index} headingRef={heading} onSelect={selectStep}
+                  onWatch={selected?.state === 'ready' && !preview ? selectStep : null} />
+              </div> : project && <Progress project={project} connection={connection} />}
+            </div>}
+          {plan && <GuideReferences plan={plan} sources={sources} checked={selection.checked} setChecked={selection.setChecked}
+            catalogEnabled={health.catalogEnabled === true} />}
           {canEdit && <div className="recovery">
             <button className="secondary" type="button" onClick={() => newGuide(true)}>{project ? 'Edit project' : 'New guide'}</button>
             <a className="text-link" href="/">Open example guide</a>
@@ -75,7 +105,7 @@ function Workbench({ route, onCreated }) {
         </div>
       </main>
     </div>
-    {builder && <Builder initial={builder.initial} health={health} onClose={() => setBuilder(null)} onCreated={onCreated} />}
+    {builder && <Builder initial={builder.initial} health={health} onClose={() => setBuilder(null)} onCreated={onCreated} onSubmitting={setSubmission} />}
   </>;
 }
 

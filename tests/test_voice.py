@@ -3,6 +3,7 @@ import base64
 import io
 import json
 import tempfile
+import threading
 import unittest
 import wave
 from pathlib import Path
@@ -33,6 +34,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sdk_sends_only_transcript_as_speech_and_decodes_response(self):
         requests = []
+        models = []
         recording = wav_bytes()
 
         def respond(request):
@@ -48,11 +50,14 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
             with genai.Client(api_key="offline-test", http_options={"httpx_async_client": http}) as sdk:
                 gemini = SimpleNamespace(client=sdk, settings=self.settings)
-                await voice_gen.generate_step_voiceover(self.line, self.wav, gemini, duration_seconds=8)
+                await voice_gen.generate_step_voiceover(
+                    self.line, self.wav, gemini, duration_seconds=8, on_voice_model=models.append,
+                )
         self.assertEqual(len(requests), 1)
         self.assertEqual(requests[0].url.path, "/v1beta/interactions")
         body = json.loads(requests[0].content)
         self.assertEqual(body["model"], self.settings.audio_model)
+        self.assertEqual(models, [body["model"]])
         self.assertEqual(body["generation_config"]["speech_config"], [{"voice": "Kore"}])
         spoken = body["input"][0]["content"][0]
         self.assertEqual(spoken["text"], self.line)
@@ -111,18 +116,62 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_local_voice_accepts_a_script_as_text_and_rejects_empty_output(self):
         recording = wav_bytes()
         received = []
+        models = []
 
         def speak(cmd, *, input, **kwargs):
             received.append((cmd, input))
             Path(cmd[cmd.index("-w") + 1]).write_bytes(recording)
 
         with patch.object(voice_gen.shutil, "which", side_effect=lambda name: "/bin/espeak" if name == "espeak" else None):
-            with patch.object(voice_gen.subprocess, "run", side_effect=speak):
-                await voice_gen.generate_step_voiceover(self.line, self.wav, None, prefer_gemini_audio=False)
+            with patch.object(voice_gen.subprocess, "run", side_effect=speak), patch.object(
+                voice_gen, "_generate_gemini_audio", side_effect=TimeoutError,
+            ):
+                await voice_gen.generate_step_voiceover(self.line, self.wav, None, on_voice_model=models.append)
             self.assertEqual(received[0][1].strip(), self.line)
             self.assertNotIn(self.line, received[0][0])
             recording = recording[:44]
             with patch.object(voice_gen.subprocess, "run", side_effect=speak):
                 with self.assertRaisesRegex(ValueError, "empty or incomplete"):
-                    await voice_gen.generate_step_voiceover(self.line, self.wav, None, prefer_gemini_audio=False)
+                    await voice_gen.generate_step_voiceover(
+                        self.line, self.wav, None, prefer_gemini_audio=False, on_voice_model=models.append,
+                    )
             self.assertEqual(self.wav.read_bytes(), wav_bytes())
+            self.assertEqual(models, ["espeak"])
+
+    async def test_cancellation_joins_audio_writer_before_removing_staging(self):
+        loop = asyncio.get_running_loop()
+        create = AsyncMock(return_value=SimpleNamespace(output_audio=object()))
+        gemini = SimpleNamespace(settings=self.settings, client=SimpleNamespace(
+            aio=SimpleNamespace(interactions=SimpleNamespace(create=create))))
+        self.wav.write_bytes(b"prior file")
+        for provider, function in [(True, "_write_audio"), (False, "_generate_local_tts")]:
+            with self.subTest(function=function):
+                started = asyncio.Event()
+                release = threading.Event()
+                finished = []
+                models = []
+
+                def write_to_staging(_, candidate):
+                    loop.call_soon_threadsafe(started.set)
+                    if not release.wait(5):
+                        raise TimeoutError("Test writer was never released")
+                    candidate.write_bytes(wav_bytes())
+                    finished.append(candidate)
+
+                with patch.object(voice_gen, function, side_effect=write_to_staging):
+                    job = asyncio.create_task(voice_gen.generate_step_voiceover(
+                        self.line, self.wav, gemini, prefer_gemini_audio=provider, on_voice_model=models.append,
+                    ))
+                    try:
+                        await asyncio.wait_for(started.wait(), 3)
+                        job.cancel()
+                        await asyncio.sleep(0)
+                        self.assertFalse(job.done())
+                    finally:
+                        release.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await job
+                self.assertEqual(len(finished), 1)
+                self.assertEqual(list(self.wav.parent.iterdir()), [self.wav])
+                self.assertEqual(self.wav.read_bytes(), b"prior file")
+                self.assertEqual(models, [])

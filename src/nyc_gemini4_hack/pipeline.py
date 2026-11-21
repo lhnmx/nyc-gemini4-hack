@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from time import monotonic
 
 from nyc_gemini4_hack.agents.planner import synthesize_build_plan
 from nyc_gemini4_hack.agents.researcher import research_goal_on_youtube
@@ -11,12 +12,14 @@ from nyc_gemini4_hack.config import get_settings
 from nyc_gemini4_hack.gemini_client import Gemini4Client
 from nyc_gemini4_hack.media.composer import (
     NarratedChapter, caption_chapter, compose_step_pov_video, stitch_full_tutorial,
-    write_tutorial_captions,
+    _wav_duration_seconds, run_media_work, write_tutorial_captions,
 )
-from nyc_gemini4_hack.media.motion_gen import compose_motion_with_voice, generate_step_motion
+from nyc_gemini4_hack.media.motion_gen import MotionShot, compose_motion_with_voice, generate_motion_shot
 from nyc_gemini4_hack.media.video_gen import generate_step_pov_frames
 from nyc_gemini4_hack.media.voice_gen import generate_step_voiceover
-from nyc_gemini4_hack.models import BuildStep, ProjectState, ProjectStatus, StepMediaAsset
+from nyc_gemini4_hack.models import (
+    AgentActivity, BuildStep, DecisionResult, MediaProgress, ProjectState, ProjectStatus, StepMediaAsset,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +33,7 @@ async def generate_media_for_plan(
     max_steps: int | None = None,
     prefer_gemini_audio: bool = True,
 ) -> Path | None:
-    """
-    Generate continuity-chained POV videos + synced voiceovers for each step in project.plan,
-    then stitch them into a single full_pov_tutorial.mp4.
-    """
+    """Render each physical sequence from its parent frames and assemble the film in guide order."""
     if project.plan is None:
         raise ValueError("Cannot generate media without a BuildPlan.")
     if max_steps is not None and max_steps < 1:
@@ -48,7 +48,6 @@ async def generate_media_for_plan(
     project_dir.mkdir(parents=True, exist_ok=True)
     media_base = f"/media/{project.project_id}/"
     mode = settings.pov_media_mode
-    generate_visuals = generate_step_motion if mode == "motion" else generate_step_pov_frames
 
     steps = project.plan.steps[:max_steps]
     project.full_video_url = None
@@ -70,90 +69,179 @@ async def generate_media_for_plan(
         else:
             project.media[step.step_number] = StepMediaAsset(step_number=step.step_number, status="skipped")
     project.status = ProjectStatus.GENERATING
-    project.status_message = f"Preparing the film and narration for {len(steps)} steps."
-    await emit("status", {"status": project.status.value, "message": project.status_message})
+    project.status_message = "Preparing chapter footage and narration."
+    started = monotonic()
+    chapters: dict[int, NarratedChapter] = {}
+    for step in steps:
+        project.media[step.step_number] = StepMediaAsset(step_number=step.step_number, media_mode=mode)
 
-    prev_end_frame: Path | None = None
-    chapters: list[NarratedChapter] = []
-
-    for position, step in enumerate(steps, start=1):
-        asset = StepMediaAsset(step_number=step.step_number, status="generating", media_mode=mode)
-        project.media[step.step_number] = asset
-        project.status_message = f"Rendering step {position} of {len(project.plan.steps)} · {step.title}"
-        await emit(
-            "status",
-            {
-                "status": project.status.value,
-                "message": project.status_message,
-                "step_number": step.step_number,
-            },
+    async def progress(stage, message: str, step: BuildStep | None = None) -> None:
+        project.status_message = message
+        project.media_progress = MediaProgress(
+            stage=stage, step_number=step.step_number if step else None, step_count=len(steps),
+            ready_count=len(chapters), elapsed_seconds=round(monotonic() - started, 3),
         )
+        data = {"status": project.status.value, "message": message,
+                "media_progress": project.media_progress.model_dump()}
+        if stage == "footage" and step:
+            data["step_number"] = step.step_number
+        await emit("status", data)
 
-        stage = "motion footage" if mode == "motion" else "illustrations"
+    async def outcome[T](operation: Callable[..., Awaitable[T]], *args, **kwargs) -> T | Exception:
+        # A single provider failure is a chapter error. Cancellation still stops the group.
         try:
-            voice_wav = project_dir / f"step_{step.step_number:02d}_voice.wav"
-            step_mp4 = project_dir / f"step_{step.step_number:02d}_pov.mp4"
+            return await operation(*args, **kwargs)
+        except Exception as exc:
+            return exc
 
-            visuals_task = generate_visuals(
-                step=step,
-                bible=project.plan.continuity_bible,
-                out_dir=project_dir,
-                gemini=gemini,
-                prev_step_end_frame=prev_end_frame,
-            )
-            voice_task = generate_step_voiceover(
-                script=step.narration_script,
-                out_wav=voice_wav,
-                gemini=gemini,
-                prefer_gemini_audio=prefer_gemini_audio,
-                duration_seconds=step.duration_seconds,
-            )
-            # Let both producers finish before touching the next step's files or reference.
-            visuals, wav_path = await asyncio.gather(visuals_task, voice_task, return_exceptions=True)
-            prev_end_frame = None
-            if isinstance(visuals, BaseException):
-                raise visuals
-            stage = "narration"
-            if isinstance(wav_path, BaseException):
-                raise wav_path
+    voice_slots = asyncio.Semaphore(2)
+    shot_slots = asyncio.Semaphore(settings.max_parallel_shots)
+    assembly_slots = asyncio.Semaphore(2)
+    visual_model = gemini.settings.pov_video_model if mode == "motion" else gemini.settings.pov_image_model
+    media_stages = {
+        "motion": ("Chapter footage" if mode == "motion" else "Chapter illustrations", "Gemini"),
+        "narration": ("Chapter narration", "Speech generator"),
+        "assembly": ("Chapter encoding and captions", "FFmpeg"),
+    }
+    retained_steps = {step.step_number for step, _, _ in reusable}
+    project.activity = [entry for entry in project.activity
+                        if entry.stage not in media_stages or entry.step_number in retained_steps]
 
+    async def activity(stage, state, step: BuildStep | None = None, model: str | None = None) -> None:
+        label, agent = media_stages[stage]
+        number = step.step_number if step else None
+        entry = AgentActivity(id=f"{stage}-{number or 'film'}", stage=stage, state=state, agent=agent,
+                              label=label if step else "Full film assembly", step_number=number, model=model)
+        project.record_activity(entry)
+        await emit("activity", entry.model_dump())
+
+    async def voice(step: BuildStep) -> tuple[Path, str | None] | Exception:
+        model_used = None
+
+        def record_model(name: str) -> None:
+            nonlocal model_used
+            model_used = name
+
+        async with voice_slots:
+            await activity("narration", "started", step)
+            wav = await outcome(
+                generate_step_voiceover,
+                script=step.narration_script, out_wav=project_dir / f"step_{step.step_number:02d}_voice.wav",
+                gemini=gemini, prefer_gemini_audio=prefer_gemini_audio, duration_seconds=step.duration_seconds,
+                on_voice_model=record_model,
+            )
+            if isinstance(wav, Exception):
+                await activity("narration", "failed", step)
+                return wav
+            await activity("narration", "completed", step, model_used)
+            return wav, model_used
+
+    async def visuals(step: BuildStep, previous: Path | None, recording: asyncio.Task) -> MotionShot | list[Path]:
+        arguments = dict(step=step, bible=project.plan.continuity_bible, out_dir=project_dir,
+                         gemini=gemini, prev_step_end_frame=previous)
+        if mode == "illustrated_frames":
+            return await generate_step_pov_frames(**arguments)
+        result = recording.result() if recording.done() else None
+        seconds = _wav_duration_seconds(result[0]) if isinstance(result, tuple) else None
+        return await generate_motion_shot(**arguments, speech_seconds=seconds)
+
+    async def film(
+        index: int, step: BuildStep, parent: asyncio.Task | None, recording: asyncio.Task,
+    ) -> MotionShot | list[Path] | Exception:
+        # Wait outside the semaphore so a dependent fold cannot occupy an independent shot's slot.
+        source = await parent if parent is not None else None
+        reference = source.end_frame if isinstance(source, MotionShot) else None
+        if isinstance(source, list) and source:
+            reference = source[-1]
+        async with shot_slots:
+            asset = project.media[step.step_number]
+            asset.status = "generating"
+            footage = group.create_task(outcome(visuals, step, reference, recording))
+            await progress("footage", f"Rendering step {index + 1} of {len(steps)} · {step.title}", step)
+            await emit("step_media_started", asset.model_dump())
+            await activity("motion", "started", step, visual_model)
+            return await footage
+
+    async def fail_step(asset: StepMediaAsset, stage: str, error: Exception) -> None:
+        logger.error("Failed to generate %s for step %s", stage, asset.step_number, exc_info=error)
+        asset.status = "error"
+        asset.error = f"Step {asset.step_number} {stage} could not be generated."
+        await emit("step_media_error", asset.model_dump())
+
+    async def finish(index: int, step: BuildStep, footage: asyncio.Task, recording: asyncio.Task) -> None:
+        number = step.step_number
+        asset = project.media[number]
+        shot = await footage
+        if isinstance(shot, Exception):
+            await activity("motion", "failed", step, visual_model)
+            await fail_step(asset, "motion footage" if mode == "motion" else "illustrations", shot)
+            return
+        asset.video_model = visual_model
+        await activity("motion", "completed", step, visual_model)
+        audio = await recording
+        if isinstance(audio, Exception):
+            await fail_step(asset, "narration", audio)
+            return
+        wav, asset.voice_model = audio
+
+        async with assembly_slots:
+            await progress("assembly", f"Adding narration and captions to step {index + 1} of {len(steps)}.", step)
+            await activity("assembly", "started", step)
             stage = "video assembly"
-            if mode == "motion":
-                step_mp4, poster, end_frame = await compose_motion_with_voice(
-                    video=visuals, voice_wav=wav_path, out_mp4=step_mp4,
-                )
-            else:
-                await compose_step_pov_video(
-                    frames=visuals, voice_wav=wav_path, out_mp4=step_mp4, min_duration=step.duration_seconds,
-                )
-                poster, end_frame = visuals[0], visuals[-1]
-            stage = "captions"
-            chapter = await asyncio.to_thread(caption_chapter, step_mp4, wav_path, step.narration_script)
-            prev_end_frame = end_frame
-            chapters.append(chapter)
+            step_mp4 = project_dir / f"step_{number:02d}_pov.mp4"
+            try:
+                if isinstance(shot, MotionShot):
+                    step_mp4, poster, _ = await compose_motion_with_voice(video=shot, voice_wav=wav, out_mp4=step_mp4)
+                else:
+                    await compose_step_pov_video(
+                        frames=shot, voice_wav=wav, out_mp4=step_mp4, min_duration=step.duration_seconds,
+                    )
+                    poster = shot[0]
+                stage = "captions"
+                chapter = await run_media_work(caption_chapter, step_mp4, wav, step.narration_script)
+            except Exception as exc:
+                await fail_step(asset, stage, exc)
+                await activity("assembly", "failed", step)
+                return
 
+            chapters[number] = chapter
             asset.status = "ready"
             asset.keyframe_url = media_base + poster.name
-            asset.audio_url = media_base + wav_path.name
+            asset.audio_url = media_base + wav.name
             asset.video_url = media_base + step_mp4.name
             asset.captions_url = media_base + step_mp4.with_suffix(".vtt").name
             asset.duration_seconds = chapter.duration_seconds
-        except Exception:
-            logger.exception("Failed to generate media for step %s", step.step_number)
-            asset.status = "error"
-            asset.error = f"Step {step.step_number} {stage} could not be generated."
-            await emit("step_media_error", asset.model_dump())
-        else:
+            project.media_progress.ready_count = len(chapters)
+            project.media_progress.elapsed_seconds = round(monotonic() - started, 3)
             await emit("step_media_ready", asset.model_dump())
+            await activity("assembly", "completed", step)
+
+    async with asyncio.TaskGroup() as group:
+        # Nodes share only the footage task of their *declared* parent. A failed parent
+        # yields no reference; its children can restart from their grounded opening state.
+        footage_by_step = {0: None}
+        finishes = []
+        previous = None
+        for index, step in enumerate(steps):
+            parent = previous if step.visual_parent == -1 else footage_by_step[step.visual_parent]
+            recording = group.create_task(voice(step))
+            footage = group.create_task(film(index, step, parent, recording))
+            finishes.append(group.create_task(finish(index, step, footage, recording)))
+            footage_by_step[step.step_number] = footage
+            previous = footage
+        # Propagate a cancelled provider or publisher to the whole project as well as external cancellation.
+        await asyncio.gather(*finishes)
 
     full_mp4: Path | None = None
     ready, requested = len(chapters), len(steps)
     if ready + len(reusable) == len(project.plan.steps):
+        await progress("stitching", "Assembling the full film and aligning chapter captions.")
+        await activity("assembly", "started")
         try:
             for step, asset, video in reusable:
                 wav = project_dir / f"step_{step.step_number:02d}_voice.wav"
                 recorded_voice = wav if wav.is_file() else None
-                chapter = await asyncio.to_thread(
+                chapter = await run_media_work(
                     caption_chapter, video, recorded_voice, step.narration_script,
                 )
                 if recorded_voice is None and asset.audio_url == media_base + wav.name:
@@ -161,22 +249,25 @@ async def generate_media_for_plan(
                 asset.media_mode = mode
                 asset.duration_seconds = chapter.duration_seconds
                 asset.captions_url = media_base + video.with_suffix(".vtt").name
-                chapters.append(chapter)
+                chapters[step.step_number] = chapter
+            ordered_chapters = [chapters[step.step_number] for step in project.plan.steps]
             video = await stitch_full_tutorial(
-                [chapter.video for chapter in chapters], project_dir / "full_pov_tutorial.mp4",
-                durations=[chapter.duration_seconds for chapter in chapters],
+                [chapter.video for chapter in ordered_chapters], project_dir / "full_pov_tutorial.mp4",
+                durations=[chapter.duration_seconds for chapter in ordered_chapters],
             )
             captions = video.with_suffix(".vtt")
-            starts = await asyncio.to_thread(write_tutorial_captions, chapters, captions)
+            starts = await run_media_work(write_tutorial_captions, ordered_chapters, captions)
         except Exception:
             logger.exception("Could not stitch tutorial for %s", project.project_id)
             project.error = "The individual clips are ready. The full video could not be assembled."
+            await activity("assembly", "failed")
         else:
             full_mp4 = video
             project.full_video_url = media_base + video.name
             project.full_captions_url = media_base + captions.name
             for step, start in zip(project.plan.steps, starts, strict=True):
                 project.media[step.step_number].chapter_start_seconds = start
+            await activity("assembly", "completed")
             await emit("full_video_ready", {
                 "video_url": project.full_video_url,
                 "captions_url": project.full_captions_url,
@@ -184,7 +275,7 @@ async def generate_media_for_plan(
             })
 
     if ready < requested:
-        project.status = ProjectStatus.PARTIAL if ready else ProjectStatus.FAILED
+        project.status = ProjectStatus.PARTIAL if ready or reusable else ProjectStatus.FAILED
         project.error = f"{ready} of {requested} requested clips are ready. The written guide is available."
     elif project.error:
         project.status = ProjectStatus.PARTIAL
@@ -200,7 +291,11 @@ async def generate_media_for_plan(
         )
     else:
         project.status_message = f"Your narrated film is ready with {ready} chapters."
-    await emit("status", {"status": project.status.value, "message": project.status_message})
+    project.media_progress.elapsed_seconds = round(monotonic() - started, 3)
+    await emit("status", {
+        "status": project.status.value, "message": project.status_message,
+        "media_progress": project.media_progress.model_dump(),
+    })
 
     return full_mp4
 
@@ -209,7 +304,7 @@ async def run_project_pipeline(
     project: ProjectState,
     publish_event: EventPublisher | None = None,
     direct_urls: list[str] | None = None,
-    max_videos: int = 2,
+    max_videos: int = 1,
     generate_media: bool = True,
     max_media_steps: int | None = None,
 ) -> ProjectState:
@@ -223,6 +318,14 @@ async def run_project_pipeline(
         if publish_event is not None:
             await publish_event(project.project_id, event, data)
 
+    async def record_activity(entry: AgentActivity) -> None:
+        project.record_activity(entry)
+        await emit("activity", entry.model_dump())
+
+    async def record_decisions(decisions: list[DecisionResult]) -> None:
+        project.decisions_log.extend(decisions)
+        await emit("research_decisions", {"decisions": [decision.model_dump() for decision in project.decisions_log]})
+
     gemini: Gemini4Client | None = None
     try:
         gemini = Gemini4Client()
@@ -234,13 +337,14 @@ async def run_project_pipeline(
             {"status": project.status.value, "message": project.status_message},
         )
 
-        extracts, decisions = await research_goal_on_youtube(
+        extracts, _ = await research_goal_on_youtube(
             goal=project.goal,
             gemini=gemini,
             max_videos=max_videos,
             direct_urls=direct_urls,
+            on_activity=record_activity,
+            on_decisions=record_decisions,
         )
-        project.decisions_log.extend(decisions)
 
         await emit(
             "research_complete",
@@ -249,7 +353,7 @@ async def run_project_pipeline(
                     {"title": e.title, "url": e.url, "audio": e.language_or_audio_notes}
                     for e in extracts
                 ],
-                "decisions": [d.model_dump() for d in decisions],
+                "decisions": [d.model_dump() for d in project.decisions_log],
             },
         )
 
@@ -266,6 +370,7 @@ async def run_project_pipeline(
             extracts=extracts,
             owned_items=project.owned_items,
             gemini=gemini,
+            on_activity=record_activity,
         )
         project.plan = plan
         project.full_video_url = None

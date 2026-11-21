@@ -42,6 +42,7 @@ class DecisionResult(BaseModel):
     rationale: str = ""
     model_used: str = ""
     via_decisions_api: bool = False
+    source_title: str | None = None
 
 
 class TutorialSegment(BaseModel):
@@ -101,6 +102,10 @@ class PhysicalStateTransition(BaseModel):
 
 class BuildStep(BaseModel):
     step_number: int = Field(ge=1)
+    visual_parent: int = Field(
+        default=-1, ge=-1,
+        description="Use -1 to continue the preceding step, 0 for an independent setup, or an earlier step number.",
+    )
     title: str
     instruction_text: str
     narration_script: str
@@ -136,8 +141,13 @@ class BuildPlan(BaseModel):
     @field_validator("steps")
     @classmethod
     def distinct_steps(cls, steps: list[BuildStep]) -> list[BuildStep]:
-        if len({step.step_number for step in steps}) != len(steps):
-            raise ValueError("Every build step needs a unique step number.")
+        earlier: set[int] = set()
+        for step in steps:
+            if step.step_number in earlier:
+                raise ValueError("Every build step needs a unique step number.")
+            if step.visual_parent > 0 and step.visual_parent not in earlier:
+                raise ValueError("A visual parent must refer to an earlier step in this guide.")
+            earlier.add(step.step_number)
         return steps
 
 
@@ -163,6 +173,8 @@ class StepMediaAsset(BaseModel):
     step_number: int
     status: str = "pending"  # pending, generating, ready, error or skipped
     media_mode: Literal["motion", "illustrated_frames"] | None = None
+    video_model: str | None = None
+    voice_model: str | None = None
     keyframe_url: str | None = None
     video_url: str | None = None
     audio_url: str | None = None
@@ -186,6 +198,26 @@ class ProjectEvent(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class AgentActivity(BaseModel):
+    id: str
+    stage: Literal["research", "planning", "motion", "narration", "assembly"]
+    state: Literal["started", "completed", "failed"]
+    label: str
+    agent: str
+    model: str | None = None
+    detail: str = ""
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    step_number: int | None = Field(default=None, ge=1)
+
+
+class MediaProgress(BaseModel):
+    stage: Literal["footage", "assembly", "stitching"]
+    step_count: int = Field(ge=0)
+    ready_count: int = Field(ge=0)
+    elapsed_seconds: float = Field(ge=0)
+    step_number: int | None = Field(default=None, ge=1)
+
+
 class ProjectState(BaseModel):
     project_id: str = Field(pattern=r"^[a-zA-Z0-9_-]+$")
     goal: str
@@ -196,11 +228,20 @@ class ProjectState(BaseModel):
     plan: BuildPlan | None = None
     cart: ShoppingCartProposal | None = None
     media: dict[int, StepMediaAsset] = Field(default_factory=dict)
+    media_progress: MediaProgress | None = None
+    activity: list[AgentActivity] = Field(default_factory=list)
     full_video_url: str | None = None
     full_captions_url: str | None = None
     decisions_log: list[DecisionResult] = Field(default_factory=list)
     error: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    def record_activity(self, entry: AgentActivity) -> None:
+        for index, current in enumerate(self.activity):
+            if current.id == entry.id:
+                self.activity[index] = entry
+                return
+        self.activity.append(entry)
 
 
 class CreateProjectRequest(BaseModel):

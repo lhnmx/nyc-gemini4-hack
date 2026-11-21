@@ -31,6 +31,7 @@ class Settings(BaseSettings):
 
     # Media Generation (POV Keyframes / Video / Voice)
     pov_media_mode: Literal["motion", "illustrated_frames"] = "motion"
+    max_parallel_shots: int = Field(default=2, ge=1, le=4)
     pov_video_model: str = Field(default="gemini-omni-1.2-flash")
     pov_image_model: str = Field(default="gemini-3.1-flash-image")
     audio_model: str = Field(default="gemini-3.8-flash-tts")
@@ -43,6 +44,7 @@ class Settings(BaseSettings):
 
     # Shopify Commerce (shop.dev / Storefront MCP)
     shopify_mcp_url: str = Field(default="")
+    shopify_agent_profile_url: str = Field(default="")
     shopify_storefront_token: str = Field(default="")
     shopify_shop_domain: str = Field(default="")
 

@@ -113,7 +113,7 @@ def main() -> None:
     source.add_argument("--from-json", type=Path, help="Render POV media directly from an existing project_state.json")
     parser.add_argument("--owned", default="", help="Comma-separated items you already own")
     parser.add_argument("--url", action="append", default=[], help="Optional direct YouTube URL(s)")
-    parser.add_argument("--max-videos", type=positive_int, default=2, help="Max YouTube videos to watch")
+    parser.add_argument("--max-videos", type=positive_int, default=1, help="Number of usable YouTube tutorials to analyze")
     parser.add_argument("--skip-media", action="store_true", help="Skip POV video & voice generation")
     parser.add_argument("--max-media-steps", type=positive_int, default=None, help="Limit number of steps to render POV video for")
     args = parser.parse_args()
